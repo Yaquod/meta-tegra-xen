@@ -35,3 +35,7 @@ do_deploy:append() {
 }
 
 addtask deploy after do_install before do_package
+FILESEXTRAPATHS:prepend := "${THISDIR}/${PN}:"
+
+SRC_URI += "file://0001-arm-Add-NVIDIA-Tegra234-platform-support.patch"
+

@@ -1,25 +1,29 @@
-FILESEXTRAPATHS:prepend := "${THISDIR}\files:"
+FILESEXTRAPATHS:prepend := "${THISDIR}/${PN}:"
 
-# TODO: should work on xen patch here in SRC_URI
+SRC_URI += "file://0001-arm-Add-NVIDIA-Tegra234-platform-support.patch \
+            file://0001-xen-Fix-printk-error.patch \
+            file://0001-arm-efi-Tegra234-Clear-CCPMU-RAS-and-drain-SError-be.patch \
+            file://xen-tegra234.cfg \
+"
 
-PACKAGECONFIG:append = " sdl"
-
+# Tegra-specific build flags
 EXTRA_OECONF += " \
     --enable-systemd \
     --with-xen-scriptdir=${sysconfdir}/xen/scripts \
 "
 
+# Install Xen binary to /boot for L4TLauncher
 do_install:append() {
     install -d ${D}/boot
-
-    # L4TLauncher expects xen.efi
+   
     if [ -f ${B}/xen/xen ]; then
         install -m 0644 ${B}/xen/xen ${D}/boot/xen.efi
     fi
-
+    
     # Create Xen config directory
     install -d ${D}${sysconfdir}/xen
-
+    
+    # Default xl.conf
     cat > ${D}${sysconfdir}/xen/xl.conf << 'EOF'
 # Xen toolstack configuration for Tegra
 autoballoon="off"
@@ -31,11 +35,13 @@ EOF
 
 # Deploy Xen to boot partition
 do_deploy:append() {
-    install -m 0644 ${D}/boot/xen.efi ${DEPLOYDIR}/
+    install -d ${DEPLOYDIR}
+    if [ -f ${D}/boot/xen.efi ]; then
+        install -m 0644 ${D}/boot/xen.efi ${DEPLOYDIR}/xen.efi
+    fi
 }
 
-addtask deploy after do_install before do_package
-FILESEXTRAPATHS:prepend := "${THISDIR}/${PN}:"
-
-SRC_URI += "file://0001-arm-Add-NVIDIA-Tegra234-platform-support.patch"
-
+FILES:${PN} += " \
+    /boot/xen.efi \
+    ${sysconfdir}/xen/xl.conf \
+"

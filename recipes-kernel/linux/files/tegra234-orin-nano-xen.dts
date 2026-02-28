@@ -1,99 +1,88 @@
 /dts-v1/;
-
-#include "tegra234-p3768-0000+p3767-0000.dts"
+/plugin/;
 
 / {
-  model = "NVIDIA Jetson Orin Nano with Xen";
-  compatible = "nvidia,p3768-0000+p3767-0000", "nvidia,tegra234";
-
-  chosen{
-    #address-cells = <2>;
-    #size-cells = <2>;
-
-    /* Xen hypervisor node */
-    xen,xen-bootargs = "console=dtuart dtuart=serial0 dom0_mem=4G dom0_max_vcpus=2 dom0_vcpus_pin sched=credit2";
-    xen,dom0-bootargs = "console=hvc0 earlycon=xen earlyprintk=xen clk_ignore_unused root=/dev/mmcblk0p1";
-
-    /* Multiboot2 Modules */
-    module@0 {
-      compatible = "xen,linux-zimage", "xen,multiboot-module";
-      reg = <0x0 0x90000000 0x0 0x30000000>;
-      
-      /* Dom0 kernel */
-      bootargs = "console=hvc0 root=/dev/mmcblk0p1";
-    };
-
-    /* stdout for xen */
-    stdout-path = "serial0:115200n8";
-  };
-
-  /* Memory Reservation for Xen */
-  reserved-memory {
-    #address-cells = <2>;
-    #size-cells = <2>;
-    ranges;
+    compatible = "nvidia,p3768-0000+p3767-0000", "nvidia,tegra234";
     
-    /* Xen Hypervisory Memory */
-    xen_reserved: xen@80000000 {
-        reg = <0x0 0x80000000 0x0 0x04000000>; /* 64Mb */
-        no-map;
-              };
+    fragment@0 {
+        target-path = "/";
+        __overlay__ {
+            chosen {
+                #address-cells = <2>;
+                #size-cells = <2>;
+                
+                /* Xen hypervisor arguments */
+		xen,xen-bootargs = "console=dtuart dtuart=/bus@0/serial@3100000 dom0_mem=2G dom0_max_vcpus=4 sched=credit2 loglvl=all guest_loglvl=all iommu=verbose smmu=verbose";
+            
+                /* Dom0 kernel arguments */
+                xen,dom0-bootargs = "console=hvc0 earlycon=xen earlyprintk=xen clk_ignore_unused root=/dev/mmcblk0p1 rw rootwait rootfstype=ext4";
 
-    /* Shared Memory for inter-communication */
-    xen_shared: xen@84000000{
-        compatible = "xen,shared-memory-v1";
-        reg = <0x0 0x84000000 0x0 0x01000000>;/* 16Mb */
-        xen,id = "shared-mem-0";
-        xen,shared-mem;
+                /* Multiboot module for Dom0 kernel */
+                module@0 {
+                    compatible = "xen,linux-zimage", "xen,multiboot-module";
+                    reg = <0x0 0x84000000 0x0 0x03000000>;
+                };
             };
-  };
-
-  /* Passthrough devices for Dom0 */
-  passthrough {
-    compatible = "simple-bus";
-    #address-cells = <2>;
-    #size-cells = <2>;
-    ranges;
-    
-    /* Keep GPU in Dom0 */
-    gpu@17000000 {
-      compatible = "nvidia,tegra234-gv11b";
-      reg = <0x0 0x17000000 0x0 0x10000000>,<0x0 0x18000000 0x0 0x10000000>;
-      interrupts = <GIC_SPI 100 IRQ_TYPE_LEVEL_HIGH>,<GIC_SPI 102 IRQ_TYPE_LEVEL_HIGH>;
-      iommus = <&smmu 0>;
-      status = "okay";
+            
+            reserved-memory {
+                #address-cells = <2>;
+                #size-cells = <2>;
+                ranges;
+                
+                /* Reserve memory for Xen hypervisor */
+                xen_reserved: xen@80000000 {
+                    reg = <0x0 0x80000000 0x0 0x04000000>;
+                    no-map;
+                };
+            };
+        };
     };
-  };
-};
+    
+    /* Remove reset lines from UART to prevent Xen crash */
+    fragment@1 {
+        target = <&serial1>;
+        __overlay__ {
+            /delete-property/ resets;
+            /delete-property/ reset-names;
+            status = "okay";
+        };
+    };
+    
+    /* protect other UARTs if needed */
+    fragment@2 {
+        target = <&serial2>;
+        __overlay__ {
+            /delete-property/ resets;
+            /delete-property/ reset-names;
+        };
+    };
+    
 
-/* Serial Console for Xen */
-&serial0 {
-  status = "okay";
-  /delete-property/ resets;
-  /delete-property/ resets-name;
-};
+/*
+The three SMMU instances on Tegra234:
+smmu_niso0  0x08000000  General-purpose DMA (bpmp, aon, host1x)
+smmu_iso    0x10000000  Isochronous (camera, display)
+smmu_niso1  0x12000000  High-bandwidth (GPU, PCIe, NVMe)
+*/
+    /* Ensure SMMU is enabled for device isolation */
+    fragment@3 {
+        target = <&smmu_niso0>;
+        __overlay__ {
+            status = "okay";
+        };
+    };
 
-/* GICv3 - ensure Xen Compatibility */
-&gic {
-  compatible = "arm,gic-v3";
-  #interrupt-cells = <3>;
-  #redistributor-regions = <1>;
-  reg = <0x0 0x0f400000 0x0 0x010000>,   /* GICD */
-        <0x0 0x0f440000 0x0 0x200000>;   /* GICR */
-};
-
-/* SMMU Configrution for device isolation */
-&smmu_iso {
-  status = "okay";
-  #iommu-cells = <1>;
-};
-
-&smmu_niso0 {
-  status = "okay";
-  #iommu-cells = <1>;
-};
-
-&smmu_niso1 {
-  status = "okay";
-  #iommu-cells = <1>;
+    fragment@4 {
+        target = <&smmu_iso>;
+        __overlay__ {
+            status = "okay";
+        };
+    };
+    
+    fragment@5 {
+        target = <&smmu_niso1>;
+        __overlay__ {
+            status = "okay";
+        };
+    };
 };

@@ -3,86 +3,59 @@
 
 / {
     compatible = "nvidia,p3768-0000+p3767-0000", "nvidia,tegra234";
-    
     fragment@0 {
-        target-path = "/";
-        __overlay__ {
-            chosen {
-                #address-cells = <2>;
-                #size-cells = <2>;
-                
-                /* Xen hypervisor arguments */
-		xen,xen-bootargs = "console=dtuart dtuart=/bus@0/serial@3100000 dom0_mem=2G dom0_max_vcpus=4 sched=credit2 loglvl=all guest_loglvl=all iommu=verbose smmu=verbose";
-            
-                /* Dom0 kernel arguments */
-                xen,dom0-bootargs = "console=hvc0 earlycon=xen earlyprintk=xen clk_ignore_unused root=/dev/mmcblk0p1 rw rootwait rootfstype=ext4";
-
-                /* Multiboot module for Dom0 kernel */
-                module@0 {
-                    compatible = "xen,linux-zimage", "xen,multiboot-module";
-                    reg = <0x0 0x84000000 0x0 0x03000000>;
-                };
-            };
-            
-            reserved-memory {
-                #address-cells = <2>;
-                #size-cells = <2>;
-                ranges;
-                
-                /* Reserve memory for Xen hypervisor */
-                xen_reserved: xen@80000000 {
-                    reg = <0x0 0x80000000 0x0 0x04000000>;
-                    no-map;
-                };
-            };
-        };
-    };
-    
-    /* Remove reset lines from UART to prevent Xen crash */
-    fragment@1 {
-        target = <&serial1>;
+        target = <&serial1>;    /* /bus@0/serial@3100000 = hsuart0 */
         __overlay__ {
             /delete-property/ resets;
             /delete-property/ reset-names;
             status = "okay";
         };
     };
-    
-    /* protect other UARTs if needed */
-    fragment@2 {
-        target = <&serial2>;
-        __overlay__ {
-            /delete-property/ resets;
-            /delete-property/ reset-names;
-        };
-    };
-    
 
-/*
-The three SMMU instances on Tegra234:
-smmu_niso0  0x08000000  General-purpose DMA (bpmp, aon, host1x)
-smmu_iso    0x10000000  Isochronous (camera, display)
-smmu_niso1  0x12000000  High-bandwidth (GPU, PCIe, NVMe)
-*/
-    /* Ensure SMMU is enabled for device isolation */
-    fragment@3 {
+    /* ----------------------------------------------------------------
+     * Fragment 1-3: Disable all three SMMU instances
+     *
+     * With iommu=no / smmu=no in xen.cfg, Xen does not initialise
+     * SMMU hardware. If Dom0 Linux probes arm-smmu-v3 on these nodes
+     * while the hardware is in an unknown state, it will hang or fault
+     * during Dom0 boot. Disable them here.
+     *
+     * When you are ready to enable SMMU passthrough:
+     *   1. Set Xen options: smmu=yes iommu=yes
+     *   2. Change these back to status = "okay"
+     *   3. Rebuild and reflash
+     *
+     * Three SMMU instances on Tegra234:
+     *   smmu_niso0  0x08000000  General DMA (bpmp, aon, host1x)
+     *   smmu_iso    0x10000000  Isochronous (camera, display)
+     *   smmu_niso1  0x12000000  High-BW (GPU, PCIe, NVMe)
+     * ---------------------------------------------------------------- */
+    
+    fragment@1 {
         target = <&smmu_niso0>;
         __overlay__ {
-            status = "okay";
+            status = "disabled";
+        };
+    };
+
+    fragment@2 {
+        target = <&smmu_iso>;
+        __overlay__ {
+            status = "disabled";
+        };
+    };
+
+    fragment@3 {
+        target = <&smmu_niso1>;
+        __overlay__ {
+            status = "disabled";
         };
     };
 
     fragment@4 {
-        target = <&smmu_iso>;
+        target-path = "/bus@0/tcu@3100000";
         __overlay__ {
-            status = "okay";
-        };
-    };
-    
-    fragment@5 {
-        target = <&smmu_niso1>;
-        __overlay__ {
-            status = "okay";
+            status = "disabled";
         };
     };
 };

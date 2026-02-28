@@ -6,9 +6,16 @@ inherit core-image
 IMAGE_INSTALL = " \
     packagegroup-core-boot \
     xen \
+    xen-efi \
     xen-tools \
-    kernel-image \
-    kernel-devicetree \
+    xen-tools-xencommons \
+    xen-tools-xenstored \
+    xen-tools-xendomains \
+    xen-tools-scripts-common \
+    xen-tools-scripts-block \
+    xen-tools-scripts-network \
+    xen-tools-volatiles \
+    xen-dtb-merge \
     xen-bootfiles \
 "
 
@@ -19,3 +26,20 @@ IMAGE_BOOT_FILES += " \
     tegra234-xen-merged.dtb \
     xen.cfg \
 "
+
+ROOTFS_POSTPROCESS_COMMAND += "add_xen_extlinux_entry; "
+
+add_xen_extlinux_entry() {
+    EXTLINUX="${IMAGE_ROOTFS}${L4T_EXTLINUX_BASEDIR}/extlinux/extlinux.conf"
+    if [ -f "${EXTLINUX}" ]; then
+        sed -i 's/^DEFAULT primary/DEFAULT xen/' "${EXTLINUX}"
+        cat >> "${EXTLINUX}" << 'XENENTRY'
+
+LABEL xen
+    MENU LABEL Xen Hypervisor + Linux Dom0
+    LINUX /boot/xen.efi
+    FDT /boot/tegra234-xen-merged.dtb
+    APPEND ${cbootargs} console=dtuart dtuart=/bus@0/serial@3100000 dom0_mem=2G dom0_max_vcpus=4 sched=credit2 loglvl=all guest_loglvl=all smmu=no iommu=no serrors=forward sync_console noreboot
+XENENTRY
+    fi
+}

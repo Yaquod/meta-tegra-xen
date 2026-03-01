@@ -1,0 +1,30 @@
+From 981b2fb41da96af6e23fcd5bcccc35798cd2fd7d Mon Sep 17 00:00:00 2001
+From: Ahmed Wafdy <ahmedadelwafdy782@gmail.com>
+Date: Sun, 1 Mar 2026 00:49:28 +0000
+Subject: [PATCH] Clear only ERR_STATUS.V from Xen, never touch ERR_ADDR, so
+ ATF's poison signature check can succeed
+
+---
+ xen/arch/arm/platforms/tegra234.c | 9 +++------
+ 1 file changed, 3 insertions(+), 6 deletions(-)
+
+diff --git a/xen/arch/arm/platforms/tegra234.c b/xen/arch/arm/platforms/tegra234.c
+index b69f7b123f..e5e8ac2ca4 100644
+--- a/xen/arch/arm/platforms/tegra234.c
++++ b/xen/arch/arm/platforms/tegra234.c
+@@ -63,12 +63,9 @@ static int __init tegra234_init(void)
+                (unsigned long long)status,
+                (unsigned long long)readq(ccpmu + CCPMU_ERR0ADDR_OFF));
+ 
+-        /* W1C: write 1 to AV and V to clear */
+-        writeq(CCPMU_ERR_STATUS_AV | CCPMU_ERR_STATUS_V,
+-               ccpmu + CCPMU_ERR0STATUS_OFF);
+-        writeq(0ULL, ccpmu + CCPMU_ERR0ADDR_OFF);
+-
+-        dsb(sy);
++        /* W1C: write 1 to V to clear */
++        writeq(CCPMU_ERR_STATUS_V, ccpmu + CCPMU_ERR0STATUS_OFF);       
++	dsb(sy);
+     }
+ 
+     iounmap(ccpmu);

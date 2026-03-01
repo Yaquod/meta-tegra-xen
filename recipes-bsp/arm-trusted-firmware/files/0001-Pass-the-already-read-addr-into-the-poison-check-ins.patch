@@ -1,0 +1,47 @@
+From a03f777140f706c68531f93cb89df9a9109af185 Mon Sep 17 00:00:00 2001
+From: Ahmed Wafdy <ahmedadelwafdy782@gmail.com>
+Date: Sun, 1 Mar 2026 00:42:17 +0000
+Subject: [PATCH] Pass the already-read addr into the poison check instead of
+ re-reading MMIO
+
+---
+ plat/nvidia/tegra/soc/t234/plat_ras.c | 12 ++++++------
+ 1 file changed, 6 insertions(+), 6 deletions(-)
+
+diff --git a/plat/nvidia/tegra/soc/t234/plat_ras.c b/plat/nvidia/tegra/soc/t234/plat_ras.c
+index b092e35..1306055 100644
+--- a/plat/nvidia/tegra/soc/t234/plat_ras.c
++++ b/plat/nvidia/tegra/soc/t234/plat_ras.c
+@@ -224,7 +224,7 @@ static void tegra234_ras_clear_ccpm_stale(void)
+ 
+ #define TEGRA234_MB2_POISON_ADDR	ULL(0x60a5a5a5a5a5a5a5)
+ static bool tegra234_ccpmu_is_mb2_boot_poison(uint32_t base,
+-		        uint64_t status)
++		        uint64_t status,uint64_t addr)
+ {
+   if (base != TEGRA234_RAS_CCPMU_BASE) {
+      return false;
+@@ -232,10 +232,10 @@ static bool tegra234_ccpmu_is_mb2_boot_poison(uint32_t base,
+   if (ERR_STATUS_GET_FIELD(status, UE) == 0U) {
+      return false;
+   }
+-  if (mmio_read_64(TEGRA234_RAS_CCPMU_BASE + ERR_ADDR(0)) !=
+-      TEGRA234_MB2_POISON_ADDR) {
+-	  return false;
+-  }
++  if (addr != TEGRA234_MB2_POISON_ADDR){
++     return false;
++  }  
++
+   return true;
+ }	
+ 
+@@ -345,7 +345,7 @@ static int32_t tegra234_ras_node_handler(uint32_t base, const char *name,
+ 
+ 		ret = -ENOTRECOVERABLE;
+ 		/* Suppress halt for the known MB2 stale CCPMU boot poison. */
+-		if (tegra234_ccpmu_is_mb2_boot_poison(base, status)) {
++		if (tegra234_ccpmu_is_mb2_boot_poison(base, status, addr)) {
+ 		   WARN("tegra234: suppressing stale MB2 CCPMU boot poison "
+ 		         "(status=0x%" PRIx64 "), clearing\n", status);
+ 		   tegra234_ras_clear_ccpm_stale();

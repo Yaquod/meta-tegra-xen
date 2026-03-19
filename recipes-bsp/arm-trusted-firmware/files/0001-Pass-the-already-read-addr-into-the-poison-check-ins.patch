@@ -1,4 +1,4 @@
-From b1ddfb0b9ce2048e834b1bbf1b49b1e22db69791 Mon Sep 17 00:00:00 2001
+From c864c618eb89e15c3ec9bed1098a6e88f483c876 Mon Sep 17 00:00:00 2001
 From: Ahmed Wafdy <ahmedadelwafdy782@gmail.com>
 Date: Sun, 1 Mar 2026 00:42:17 +0000
 Subject: [PATCH] =?UTF-8?q?TEGRA234=20WORKAROUND:=20Clear=20any=20stale=20?=
@@ -48,14 +48,15 @@ first-cluster bring-up requires DSU-AE L3 ECC scrub (2MiB) which takes significa
  plat/nvidia/tegra/soc/t186/plat_memctrl.c     |   1 +
  plat/nvidia/tegra/soc/t186/plat_smmu.c        |   1 +
  plat/nvidia/tegra/soc/t194/plat_memctrl.c     |   1 +
- .../soc/t234/drivers/include/mce_private.h    |   3 +
+ .../soc/t234/drivers/include/mce_private.h    |   4 +-
  .../tegra/soc/t234/drivers/include/t234_ari.h |   6 +
  plat/nvidia/tegra/soc/t234/drivers/mce/ari.c  | 185 ++++++---
+ plat/nvidia/tegra/soc/t234/drivers/mce/mce.c  |   2 +-
  plat/nvidia/tegra/soc/t234/plat_memctrl.c     |   1 +
- .../tegra/soc/t234/plat_psci_handlers.c       |  20 +
+ .../tegra/soc/t234/plat_psci_handlers.c       |  34 +-
  plat/nvidia/tegra/soc/t234/plat_ras.c         | 391 ++++++++++--------
  plat/nvidia/tegra/soc/t234/plat_setup.c       |  38 ++
- 23 files changed, 495 insertions(+), 247 deletions(-)
+ 24 files changed, 506 insertions(+), 253 deletions(-)
 
 diff --git a/plat/nvidia/tegra/common/tegra_bl31_setup.c b/plat/nvidia/tegra/common/tegra_bl31_setup.c
 index d1616f6..71a8a4e 100644
@@ -339,7 +340,7 @@ index 2182699..6544190 100644
  #include <common/bl_common.h>
  #include <mce.h>
 diff --git a/plat/nvidia/tegra/soc/t234/drivers/include/mce_private.h b/plat/nvidia/tegra/soc/t234/drivers/include/mce_private.h
-index 159469e..26a7620 100644
+index 159469e..26f2fff 100644
 --- a/plat/nvidia/tegra/soc/t234/drivers/include/mce_private.h
 +++ b/plat/nvidia/tegra/soc/t234/drivers/include/mce_private.h
 @@ -52,6 +52,9 @@
@@ -352,6 +353,12 @@ index 159469e..26a7620 100644
  /* declarations for ARI handler functions */
  /* Function from NS world */
  uint64_t ari_get_version(uint32_t ari_base);
+@@ -90,5 +93,4 @@ bool mce_is_cluster_in_split_mode(unsigned int id);
+ bool mce_is_cluster_in_hybrid_mode(unsigned int id);
+ void mce_enable_gic_sync_control(void);
+ void mce_disable_gic_sync_control(void);
+-
+ #endif /* __MCE_PRIVATE_H__ */
 diff --git a/plat/nvidia/tegra/soc/t234/drivers/include/t234_ari.h b/plat/nvidia/tegra/soc/t234/drivers/include/t234_ari.h
 index 1df2dd4..2fe9cb0 100644
 --- a/plat/nvidia/tegra/soc/t234/drivers/include/t234_ari.h
@@ -584,6 +591,17 @@ index f9f71a3..b9deddc 100644
  }
  
  /*
+diff --git a/plat/nvidia/tegra/soc/t234/drivers/mce/mce.c b/plat/nvidia/tegra/soc/t234/drivers/mce/mce.c
+index 7e1ba95..68ac174 100644
+--- a/plat/nvidia/tegra/soc/t234/drivers/mce/mce.c
++++ b/plat/nvidia/tegra/soc/t234/drivers/mce/mce.c
+@@ -544,4 +544,4 @@ void mce_disable_gic_sync_control(void)
+ 	/* Verify that the WAR was enabled */
+ 	ret = ari_gic_sync_control(base, TEGRA_ARI_GIC_SYNC_STATUS);
+ 	assert(ret == TEGRA_ARI_GIC_SYNC_DISABLE);
+-}
++}
+\ No newline at end of file
 diff --git a/plat/nvidia/tegra/soc/t234/plat_memctrl.c b/plat/nvidia/tegra/soc/t234/plat_memctrl.c
 index 78c66a9..9742022 100644
 --- a/plat/nvidia/tegra/soc/t234/plat_memctrl.c
@@ -597,7 +615,7 @@ index 78c66a9..9742022 100644
  #include <common/bl_common.h>
  #include <mce.h>
 diff --git a/plat/nvidia/tegra/soc/t234/plat_psci_handlers.c b/plat/nvidia/tegra/soc/t234/plat_psci_handlers.c
-index 5e4e480..2a84c8c 100644
+index 5e4e480..862ee1f 100644
 --- a/plat/nvidia/tegra/soc/t234/plat_psci_handlers.c
 +++ b/plat/nvidia/tegra/soc/t234/plat_psci_handlers.c
 @@ -29,6 +29,7 @@
@@ -608,26 +626,45 @@ index 5e4e480..2a84c8c 100644
  
  /* state id mask */
  #define TEGRA234_STATE_ID_MASK		0xFU
-@@ -305,6 +306,18 @@ int32_t tegra_soc_pwr_domain_power_down_wfi(const psci_power_state_t *target_sta
+@@ -305,15 +306,33 @@ int32_t tegra_soc_pwr_domain_power_down_wfi(const psci_power_state_t *target_sta
  
  int32_t tegra_soc_pwr_domain_on(u_register_t mpidr)
  {
-+	 uint32_t cluster_id = MPIDR_AFFLVL2_VAL(mpidr);
-+    uint32_t core_id    = MPIDR_AFFLVL1_VAL(mpidr);
-+
-+    WARN("PSCI CPU_ON: mpidr=0x%lx cluster=%u core=%u present=%d\n",
-+         mpidr, cluster_id, core_id,
-+         mce_is_cluster_present(cluster_id));
-+
-+    if (!mce_is_cluster_present(cluster_id)) {
-+        ERROR("PSCI CPU_ON: cluster %u not present — rejecting\n",
-+              cluster_id);
-+        return PSCI_E_NOT_PRESENT;
-+    }
++	uint32_t cluster_id = MPIDR_AFFLVL2_VAL(mpidr);
++	uint32_t core_id    = MPIDR_AFFLVL1_VAL(mpidr);
  	uint64_t target_cpu = plat_core_pos_by_mpidr(mpidr);
  
- 	if (target_cpu >= PLATFORM_CORE_COUNT) {
-@@ -349,6 +362,13 @@ int32_t tegra_soc_pwr_domain_on_finish(const psci_power_state_t *target_state)
+-	if (target_cpu >= PLATFORM_CORE_COUNT) {
+-		ERROR("%s: unsupported CPU (0x%x)\n", __func__ , (uint32_t)target_cpu);
+-		return PSCI_E_NOT_PRESENT;
++	WARN("PSCI CPU_ON: mpidr=0x%lx cluster=%u core=%u\n",
++	     mpidr, cluster_id, core_id);
++
++	/*
++	 * Reject if the cluster is not present according to MCE FW.
++	 * mce_is_cluster_present() uses ari_cluster_present_map() which
++	 * queries TEGRA_ARI_CLUSTER_CONFIG — authoritative hardware truth.
++	 *
++	 */
++	if (!mce_is_cluster_present(cluster_id)) {
++		WARN("PSCI CPU_ON: cluster %u not present — skipping\n",
++		     cluster_id);
++		return PSCI_E_SUCCESS;
+ 	}
+ 
+-	(void)mce_command_handler((uint64_t)MCE_CMD_ONLINE_CORE, target_cpu, 0U, 0U);
++	if (target_cpu >= PLATFORM_CORE_COUNT) {
++		ERROR("%s: unsupported CPU (0x%x)\n", __func__,
++		      (uint32_t)target_cpu);
++		return PSCI_E_SUCCESS;
++	}
+ 
++	(void)mce_command_handler((uint64_t)MCE_CMD_ONLINE_CORE,
++				  target_cpu, 0U, 0U);
+ 	return PSCI_E_SUCCESS;
+ }
+ 
+@@ -349,6 +368,13 @@ int32_t tegra_soc_pwr_domain_on_finish(const psci_power_state_t *target_state)
  	uint32_t cpu = plat_my_core_pos();
  
  #if RAS_EXTENSION

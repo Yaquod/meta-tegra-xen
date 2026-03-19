@@ -16,7 +16,7 @@ do_install() {
 default=xen
 
 [xen]
-options=console=dtuart dtuart=/bus@0/serial@3100000 dom0_mem=2G dom0_max_vcpus=4 sched=credit2 loglvl=all guest_loglvl=all smmu=no iommu=no serrors=forward sync_console noreboot
+options=console=dtuart dtuart=/bus@0/serial@3c00000 dom0_mem=2048M dom0_max_vcpus=4 loglvl=all guest_loglvl=all smmu=no iommu=no serrors=forward sync_console noreboot
 kernel=Image console=hvc0 earlycon=xen earlyprintk=xen clk_ignore_unused root=/dev/mmcblk0p1 rw rootwait rootfstype=ext4
 ramdisk=initrd
 dtb=tegra234-xen-merged.dtb

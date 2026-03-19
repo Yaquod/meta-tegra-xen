@@ -17,7 +17,7 @@
     compatible = "nvidia,p3768-0000+p3767-0000", "nvidia,p3767-0000",
                  "nvidia,tegra234";
 
-    /* UART fix */
+    /* UART */
     fragment@0 {
         target-path = "/bus@0/serial@3100000";
         __overlay__ {
@@ -27,7 +27,7 @@
         };
     };
 
-    /* IOMMU disable (Xen manages SMMU directly) */
+    /* IOMMU: disable all SMMUs — Xen manages them directly */
     fragment@1 {
         target-path = "/bus@0/iommu@12000000";
         __overlay__ { status = "disabled"; };
@@ -38,49 +38,6 @@
     };
     fragment@3 {
         target-path = "/bus@0/iommu@8000000";
-        __overlay__ { status = "disabled"; };
-    };
-
-    /*
-     * Cluster 1 CPU nodes entirely absent on Orin Nano 6-core
-     *
-     * MCE FW core_present_bitmap bits[7:4] = 0 (all absent).
-     * These nodes must be disabled so Xen never issues PSCI CPU_ON
-     * for MPIDRs 0x10000/0x10100/0x10200/0x10300.
-     *
-     * Node names confirmed from extracted DTB:
-     *   cpu@10000, cpu@10100, cpu@10200, cpu@10300
-     */
-    fragment@4 {
-        target-path = "/cpus/cpu@10000";
-        __overlay__ { status = "disabled"; };
-    };
-    fragment@5 {
-        target-path = "/cpus/cpu@10100";
-        __overlay__ { status = "disabled"; };
-    };
-    fragment@6 {
-        target-path = "/cpus/cpu@10200";
-        __overlay__ { status = "disabled"; };
-    };
-    fragment@7 {
-        target-path = "/cpus/cpu@10300";
-        __overlay__ { status = "disabled"; };
-    };
-
-    /*
-     *
-     * MCE FW core_present_bitmap bits[9:8] = 0 (absent).
-     * Cluster 2 cores 0-1 (cpu@20000, cpu@20100) ARE present and
-     * must remain enabled — they are CPU4 and CPU5 in Dom0.
-     *
-     */
-    fragment@8 {
-        target-path = "/cpus/cpu@20200";
-        __overlay__ { status = "disabled"; };
-    };
-    fragment@9 {
-        target-path = "/cpus/cpu@20300";
         __overlay__ { status = "disabled"; };
     };
 };

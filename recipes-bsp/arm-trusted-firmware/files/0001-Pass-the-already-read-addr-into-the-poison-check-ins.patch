@@ -1,4 +1,4 @@
-From ab3f032d58e198c4c1725b6935a70711d00de01d Mon Sep 17 00:00:00 2001
+From b1ddfb0b9ce2048e834b1bbf1b49b1e22db69791 Mon Sep 17 00:00:00 2001
 From: Ahmed Wafdy <ahmedadelwafdy782@gmail.com>
 Date: Sun, 1 Mar 2026 00:42:17 +0000
 Subject: [PATCH] =?UTF-8?q?TEGRA234=20WORKAROUND:=20Clear=20any=20stale=20?=
@@ -18,122 +18,52 @@ I mirror the live ERR0STATUS bits into the W1C write so that we clear exactly th
 Another Tegra234 workaround: mask CCPMU RAS interrupt sources at the IH before ERET to non-secure world.
 
 Adding the kill + idle-wait sequence gives the MCE FW what it needs to resume normal operation before ATF tries ari_online_core() for secondary CPUs.
+
+When a previous ARI command leaves an error code in ARI_STATUS, the next call sees those bits set and the pre-flight poll correctly identifies the mailbox as busy — but nothing ever clears ARI_STATUS between commands.
+The T234 ARI spec says ARI_STATUS is cleared by the MCE firmware when it accepts a new request — but only if the previous request was cleanly completed. If it ended in an error state, the MCE FW expects SW to issue a KILL before accepting the next request.
+
+- add per-core IH masking for the secondary CPU
+tegra234_ras_init_my_cluster calls ih_write_ras_general_enb
+which re-enables the IH interrupt sources after bl31_plat_runtime_setup
+masked them — undoing the mask for each secondary CPU.
+
+Fix: Increase ARI_MAX_RETRY_COUNT for ONLINE_CORE only
+The existing ARI_MAX_RETRY_COUNT of 2,000,000 was designed for fast ARI commands (cache clean, cstate update) that complete in microseconds. ONLINE_CORE for first-cluster bring-up needs a much larger budget.
+
+first-cluster bring-up requires DSU-AE L3 ECC scrub (2MiB) which takes significantly longer than a normal ARI command at cold-boot clock frequencies.
 ---
- plat/nvidia/tegra/common/tegra_bl31_setup.c   |  92 ++++--
- plat/nvidia/tegra/common/tegra_delay_timer.c  |   3 +
- plat/nvidia/tegra/common/tegra_fiq_glue.c     |   4 +
- plat/nvidia/tegra/common/tegra_gicv2.c        |  10 +
- plat/nvidia/tegra/common/tegra_gicv3.c        |  15 +
- plat/nvidia/tegra/common/tegra_io_storage.c   |   2 +
- plat/nvidia/tegra/common/tegra_pauth.c        |   2 +
- plat/nvidia/tegra/common/tegra_platform.c     |  24 ++
- plat/nvidia/tegra/common/tegra_pm.c           |  15 +
- plat/nvidia/tegra/common/tegra_sdei.c         |   1 +
- plat/nvidia/tegra/common/tegra_sip_calls.c    |   1 +
- .../tegra/common/tegra_stack_protector.c      |   2 +
- plat/nvidia/tegra/drivers/bpmp/bpmp.c         |   9 +
- plat/nvidia/tegra/drivers/bpmp_ipc/intf.c     |  22 ++
- plat/nvidia/tegra/drivers/bpmp_ipc/ivc.c      |  24 ++
- plat/nvidia/tegra/drivers/flowctrl/flowctrl.c |  18 ++
- plat/nvidia/tegra/drivers/gpcdma/gpcdma.c     |   6 +
- .../nvidia/tegra/drivers/memctrl/memctrl_v1.c |   7 +
- .../nvidia/tegra/drivers/memctrl/memctrl_v2.c |  12 +
- plat/nvidia/tegra/drivers/pmc/pmc.c           |   6 +
- plat/nvidia/tegra/drivers/psc/psc_mailbox.c   |   2 +
- plat/nvidia/tegra/drivers/smmu/smmu.c         |   2 +
+ plat/nvidia/tegra/common/tegra_bl31_setup.c   |  82 ++--
+ plat/nvidia/tegra/common/tegra_delay_timer.c  |   1 +
+ plat/nvidia/tegra/common/tegra_gicv2.c        |   1 +
+ plat/nvidia/tegra/common/tegra_gicv3.c        |   1 +
+ plat/nvidia/tegra/common/tegra_io_storage.c   |   1 +
+ plat/nvidia/tegra/common/tegra_pauth.c        |   1 +
+ plat/nvidia/tegra/common/tegra_platform.c     |   1 +
+ plat/nvidia/tegra/common/tegra_pm.c           |   1 +
+ .../tegra/common/tegra_stack_protector.c      |   1 +
  .../tegra/include/t234/tegra234_ras_private.h |   2 +
- plat/nvidia/tegra/lib/debug/profiler.c        |   4 +
- plat/nvidia/tegra/soc/t186/drivers/mce/ari.c  |  27 ++
- plat/nvidia/tegra/soc/t186/drivers/mce/mce.c  |  10 +
- plat/nvidia/tegra/soc/t186/drivers/mce/nvg.c  |   9 +
- plat/nvidia/tegra/soc/t186/drivers/se/se.c    |   5 +
- plat/nvidia/tegra/soc/t186/plat_memctrl.c     |   7 +
- .../tegra/soc/t186/plat_psci_handlers.c       |  13 +
- plat/nvidia/tegra/soc/t186/plat_secondary.c   |   1 +
- plat/nvidia/tegra/soc/t186/plat_setup.c       |  15 +
- plat/nvidia/tegra/soc/t186/plat_sip_calls.c   |   1 +
- plat/nvidia/tegra/soc/t186/plat_smmu.c        |   2 +
- plat/nvidia/tegra/soc/t194/drivers/mce/mce.c  |  11 +
- plat/nvidia/tegra/soc/t194/drivers/mce/nvg.c  |  13 +
- plat/nvidia/tegra/soc/t194/drivers/se/se.c    |  10 +
- plat/nvidia/tegra/soc/t194/plat_memctrl.c     |   5 +
- .../tegra/soc/t194/plat_psci_handlers.c       |  13 +
- plat/nvidia/tegra/soc/t194/plat_ras.c         |   7 +
- plat/nvidia/tegra/soc/t194/plat_secondary.c   |   1 +
- plat/nvidia/tegra/soc/t194/plat_setup.c       |  14 +
- plat/nvidia/tegra/soc/t194/plat_sip_calls.c   |   1 +
- plat/nvidia/tegra/soc/t194/plat_smmu.c        |   2 +
+ plat/nvidia/tegra/lib/debug/profiler.c        |   1 +
+ plat/nvidia/tegra/soc/t186/drivers/mce/ari.c  |   1 +
+ plat/nvidia/tegra/soc/t186/drivers/se/se.c    |   1 +
+ plat/nvidia/tegra/soc/t186/plat_memctrl.c     |   1 +
+ plat/nvidia/tegra/soc/t186/plat_smmu.c        |   1 +
+ plat/nvidia/tegra/soc/t194/plat_memctrl.c     |   1 +
  .../soc/t234/drivers/include/mce_private.h    |   3 +
  .../tegra/soc/t234/drivers/include/t234_ari.h |   6 +
- plat/nvidia/tegra/soc/t234/drivers/mce/ari.c  |  64 +++-
- plat/nvidia/tegra/soc/t234/drivers/mce/mce.c  |  19 ++
- plat/nvidia/tegra/soc/t234/drivers/se/se.c    |   8 +
- plat/nvidia/tegra/soc/t234/plat_errata.c      |   2 +
- plat/nvidia/tegra/soc/t234/plat_memctrl.c     |   4 +
- .../tegra/soc/t234/plat_psci_handlers.c       |  22 ++
- plat/nvidia/tegra/soc/t234/plat_ras.c         | 303 ++++++++++--------
- plat/nvidia/tegra/soc/t234/plat_secondary.c   |   1 +
- plat/nvidia/tegra/soc/t234/plat_setup.c       |  54 ++++
- plat/nvidia/tegra/soc/t234/plat_sip_calls.c   |   1 +
- 56 files changed, 771 insertions(+), 168 deletions(-)
+ plat/nvidia/tegra/soc/t234/drivers/mce/ari.c  | 185 ++++++---
+ plat/nvidia/tegra/soc/t234/plat_memctrl.c     |   1 +
+ .../tegra/soc/t234/plat_psci_handlers.c       |  20 +
+ plat/nvidia/tegra/soc/t234/plat_ras.c         | 391 ++++++++++--------
+ plat/nvidia/tegra/soc/t234/plat_setup.c       |  38 ++
+ 23 files changed, 495 insertions(+), 247 deletions(-)
 
 diff --git a/plat/nvidia/tegra/common/tegra_bl31_setup.c b/plat/nvidia/tegra/common/tegra_bl31_setup.c
-index d1616f6..1fdf7ab 100644
+index d1616f6..71a8a4e 100644
 --- a/plat/nvidia/tegra/common/tegra_bl31_setup.c
 +++ b/plat/nvidia/tegra/common/tegra_bl31_setup.c
-@@ -66,6 +66,7 @@ extern uint64_t ns_image_entrypoint;
-  ******************************************************************************/
- entry_point_info_t *bl31_plat_get_next_image_ep_info(uint32_t type)
- {
-+	INFO("Entering %s\n", __func__);
- 	entry_point_info_t *ep =  NULL;
- 
- 	/* return BL32 entry point info if it is valid */
-@@ -84,6 +85,7 @@ entry_point_info_t *bl31_plat_get_next_image_ep_info(uint32_t type)
-  ******************************************************************************/
- bl31_plat_params_t *bl31_get_plat_params(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	return &plat_bl31_params;
- }
- 
-@@ -94,6 +96,7 @@ bl31_plat_params_t *bl31_get_plat_params(void)
- int32_t plat_parse_bl31_plat_params(bl31_plat_params_t *bl31_plat_params,
- 					void *params_from_bl)
- {
-+	INFO("Entering %s\n", __func__);
- 	bl31_plat_params_t *plat_params = (bl31_plat_params_t *)params_from_bl;
- 
- 	/*
-@@ -120,6 +123,7 @@ int32_t plat_parse_bl31_plat_params(bl31_plat_params_t *bl31_plat_params,
- #pragma weak plat_bl31_manifest_parse
- int plat_bl31_manifest_parse(const void *fdt, bl31_plat_params_t *params)
- {
-+	INFO("Entering %s\n", __func__);
- 	return -ENOTSUP;
- }
- 
-@@ -130,6 +134,7 @@ int plat_bl31_manifest_parse(const void *fdt, bl31_plat_params_t *params)
- void bl31_early_platform_setup2(u_register_t arg0, u_register_t arg1,
- 				u_register_t arg2, u_register_t arg3)
- {
-+	INFO("Entering %s\n", __func__);
- 	struct tegra_bl31_params *arg_from_bl2 = (struct tegra_bl31_params *) arg0;
- 	bl31_plat_params_t *plat_params = (bl31_plat_params_t *)arg1;
- 	int32_t ret;
-@@ -213,6 +218,7 @@ void bl31_early_platform_setup2(u_register_t arg0, u_register_t arg1,
- #ifdef SPD_trusty
- void plat_trusty_set_boot_args(aapcs64_params_t *args)
- {
-+	INFO("Entering %s\n", __func__);
- 	/*
- 	* arg0 = TZDRAM aperture available for BL32
- 	* arg1 = BL32 boot params
-@@ -235,21 +241,26 @@ void plat_trusty_set_boot_args(aapcs64_params_t *args)
-  ******************************************************************************/
+@@ -236,20 +236,24 @@ void plat_trusty_set_boot_args(aapcs64_params_t *args)
  void bl31_platform_setup(void)
  {
-+	INFO("Entering %s\n", __func__);
  	{
 -	      uint64_t ccpmu_status = mmio_read_64(TEGRA234_RAS_CCPMU_BASE + ERR_STATUS(0));
 -	      uint64_t val = 0ULL;
@@ -170,7 +100,7 @@ index d1616f6..1fdf7ab 100644
  	}
  
  	/*
-@@ -288,18 +299,49 @@ void bl31_platform_setup(void)
+@@ -288,18 +292,48 @@ void bl31_platform_setup(void)
  /*******************************************************************************
   * Perform any BL3-1 platform runtime setup prior to BL3-1 cold boot exit
   ******************************************************************************/
@@ -187,7 +117,6 @@ index d1616f6..1fdf7ab 100644
 -	 */
 -	boot_profiler_add_record("[TF] bl31 exit");
 -	boot_profiler_deinit();
-+	INFO("Entering %s\n", __func__);
 +    /*
 +     * Tegra234 workaround: mask CCPMU RAS interrupt sources at the IH
 +     * before ERET to non-secure world.
@@ -230,24 +159,8 @@ index d1616f6..1fdf7ab 100644
  }
  
  /*******************************************************************************
-@@ -308,6 +350,7 @@ void bl31_plat_runtime_setup(void)
-  ******************************************************************************/
- void bl31_plat_arch_setup(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint64_t rw_start = BL31_RW_START;
- 	uint64_t rw_size = BL_END - BL31_RW_START;
- 	uint64_t rodata_start = BL_RO_DATA_BASE;
-@@ -359,6 +402,7 @@ void bl31_plat_arch_setup(void)
-  ******************************************************************************/
- int32_t bl31_check_ns_address(uint64_t base, uint64_t size_in_bytes)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint64_t end = base + size_in_bytes - U(1);
- 
- 	/*
 diff --git a/plat/nvidia/tegra/common/tegra_delay_timer.c b/plat/nvidia/tegra/common/tegra_delay_timer.c
-index d9547c4..e813a5f 100644
+index d9547c4..db4747d 100644
 --- a/plat/nvidia/tegra/common/tegra_delay_timer.c
 +++ b/plat/nvidia/tegra/common/tegra_delay_timer.c
 @@ -5,6 +5,7 @@
@@ -258,60 +171,8 @@ index d9547c4..e813a5f 100644
  #include <arch.h>
  
  #include <drivers/delay_timer.h>
-@@ -17,6 +18,7 @@
- 
- static uint32_t tegra_timer_get_value(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	/* enable cntps_tval_el1 timer, mask interrupt */
- 	write_cntps_ctl_el1(CNTP_CTL_IMASK_BIT | CNTP_CTL_ENABLE_BIT);
- 
-@@ -32,6 +34,7 @@ static uint32_t tegra_timer_get_value(void)
-  */
- void tegra_delay_timer_init(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	static timer_ops_t tegra_timer_ops;
- 
- 	/* Value in ticks */
-diff --git a/plat/nvidia/tegra/common/tegra_fiq_glue.c b/plat/nvidia/tegra/common/tegra_fiq_glue.c
-index 5309d98..7ab4fb9 100644
---- a/plat/nvidia/tegra/common/tegra_fiq_glue.c
-+++ b/plat/nvidia/tegra/common/tegra_fiq_glue.c
-@@ -39,6 +39,7 @@ static pcpu_fiq_state_t fiq_state[PLATFORM_CORE_COUNT];
- static int tegra_fiq_interrupt_handler(unsigned int id, unsigned int flags,
- 		void *handle, void *cookie)
- {
-+	INFO("Entering %s\n", __func__);
- 	cpu_context_t *ctx = cm_get_context(NON_SECURE);
- 	el3_state_t *el3state_ctx = get_el3state_ctx(ctx);
- 	uint32_t cpu = plat_my_core_pos();
-@@ -100,6 +101,7 @@ static int tegra_fiq_interrupt_handler(unsigned int id, unsigned int flags,
-  ******************************************************************************/
- void tegra_fiq_handler_setup(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	/* return if already registered */
- 	if (fiq_handler_active == 0U) {
- 		/*
-@@ -118,6 +120,7 @@ void tegra_fiq_handler_setup(void)
-  ******************************************************************************/
- void tegra_fiq_set_ns_entrypoint(uint64_t entrypoint)
- {
-+	INFO("Entering %s\n", __func__);
- 	ns_fiq_handler_addr = entrypoint;
- }
- 
-@@ -126,6 +129,7 @@ void tegra_fiq_set_ns_entrypoint(uint64_t entrypoint)
-  ******************************************************************************/
- int32_t tegra_fiq_get_intr_context(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	cpu_context_t *ctx = cm_get_context(NON_SECURE);
- 	gp_regs_t *gpregs_ctx = get_gpregs_ctx(ctx);
- 	const el1_sysregs_t *el1state_ctx = get_el1_sysregs_ctx(ctx);
 diff --git a/plat/nvidia/tegra/common/tegra_gicv2.c b/plat/nvidia/tegra/common/tegra_gicv2.c
-index 3d78444..633d1e3 100644
+index 3d78444..8797f06 100644
 --- a/plat/nvidia/tegra/common/tegra_gicv2.c
 +++ b/plat/nvidia/tegra/common/tegra_gicv2.c
 @@ -5,6 +5,7 @@
@@ -322,76 +183,8 @@ index 3d78444..633d1e3 100644
  #include <assert.h>
  #include <platform_def.h>
  
-@@ -21,6 +22,7 @@ static unsigned int tegra_target_masks[PLATFORM_CORE_COUNT];
- /* Help function to register platform specific structure base address */
- void tegra_gic_register_ctx_ptr(uintptr_t *redist_ptr, uintptr_t *dist_ptr)
- {
-+	INFO("Entering %s\n", __func__);
- 	; /* do nohting */
- }
- 
-@@ -30,11 +32,13 @@ void tegra_gic_register_ctx_ptr(uintptr_t *redist_ptr, uintptr_t *dist_ptr)
-   *****************************************************************************/
- void tegra_gic_rdistif_on(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	; /* do nohting */
- }
- 
- void tegra_gic_rdistif_off(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	; /* do nohting */
- }
- 
-@@ -44,6 +48,7 @@ void tegra_gic_rdistif_off(void)
- void tegra_gic_setup(const interrupt_prop_t *interrupt_props,
- 		     unsigned int interrupt_props_num)
- {
-+	INFO("Entering %s\n", __func__);
- 	/*
- 	 * Tegra GIC configuration settings
- 	 */
-@@ -66,6 +71,7 @@ void tegra_gic_setup(const interrupt_prop_t *interrupt_props,
-  *****************************************************************************/
- void tegra_gic_init(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	gicv2_distif_init();
- 	gicv2_pcpu_distif_init();
- 	gicv2_set_pe_target_mask(plat_my_core_pos());
-@@ -77,6 +83,7 @@ void tegra_gic_init(void)
-  *****************************************************************************/
- void tegra_gic_cpuif_deactivate(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	gicv2_cpuif_disable();
- }
- 
-@@ -86,6 +93,7 @@ void tegra_gic_cpuif_deactivate(void)
-  *****************************************************************************/
- void tegra_gic_pcpu_init(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	gicv2_pcpu_distif_init();
- 	gicv2_set_pe_target_mask(plat_my_core_pos());
- 	gicv2_cpuif_enable();
-@@ -96,11 +104,13 @@ void tegra_gic_pcpu_init(void)
-  *****************************************************************************/
- void tegra_gic_save(uint32_t pstate_id)
- {
-+	INFO("Entering %s\n", __func__);
- 	; /* do nohting */
- }
- 
- void tegra_gic_restore(uint32_t pstate_id)
- {
-+	INFO("Entering %s\n", __func__);
- 	if (pstate_id == PSTATE_ID_SOC_POWERDN) {
- 		gicv2_distif_init();
- 	}
 diff --git a/plat/nvidia/tegra/common/tegra_gicv3.c b/plat/nvidia/tegra/common/tegra_gicv3.c
-index 0500343..9618112 100644
+index 0500343..a2dcb23 100644
 --- a/plat/nvidia/tegra/common/tegra_gicv3.c
 +++ b/plat/nvidia/tegra/common/tegra_gicv3.c
 @@ -4,6 +4,7 @@
@@ -402,114 +195,8 @@ index 0500343..9618112 100644
  #include <assert.h>
  
  #include <common/bl_common.h>
-@@ -40,6 +41,7 @@ static gicv3_dist_ctx_t *plat_dist_ctx;
- /* Help function to register platform specific structure base address */
- void tegra_gic_register_ctx_ptr(uintptr_t *redist_ptr, uintptr_t *dist_ptr)
- {
-+	INFO("Entering %s\n", __func__);
- 	assert(redist_ptr != NULL);
- 	assert(dist_ptr != NULL);
- 	plat_redist_ctx = (gicv3_redist_ctx_t *)redist_ptr;
-@@ -52,16 +54,19 @@ void tegra_gic_register_ctx_ptr(uintptr_t *redist_ptr, uintptr_t *dist_ptr)
-  */
- void arm_gicv3_distif_pre_save(unsigned int rdist_proc_num)
- {
-+	INFO("Entering %s\n", __func__);
- 	; /* do nothing */
- }
- 
- void arm_gicv3_distif_post_restore(unsigned int rdist_proc_num)
- {
-+	INFO("Entering %s\n", __func__);
- 	; /* do nothing */
- }
- 
- static unsigned int plat_tegra_mpidr_to_core_pos(unsigned long mpidr)
- {
-+	INFO("Entering %s\n", __func__);
- 	return (unsigned int)plat_core_pos_by_mpidr(mpidr);
- }
- 
-@@ -73,6 +78,7 @@ static unsigned int plat_tegra_mpidr_to_core_pos(unsigned long mpidr)
-  */
- void tegra_gicv3_override_gicr_frames(const uintptr_t *plat_gicr_frames)
- {
-+	INFO("Entering %s\n", __func__);
- 	assert(plat_gicr_frames != NULL);
- 	tegra_gicr_frames = plat_gicr_frames;
- }
-@@ -82,11 +88,13 @@ void tegra_gicv3_override_gicr_frames(const uintptr_t *plat_gicr_frames)
-  *****************************************************************************/
- void tegra_gic_rdistif_on(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	gicv3_rdistif_on(plat_my_core_pos());
- }
- 
- void tegra_gic_rdistif_off(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	gicv3_rdistif_off(plat_my_core_pos());
- }
- 
-@@ -96,6 +104,7 @@ void tegra_gic_rdistif_off(void)
- void tegra_gic_setup(const interrupt_prop_t *interrupt_props,
- 		     unsigned int interrupt_props_num)
- {
-+	INFO("Entering %s\n", __func__);
- 	/*
- 	 * Tegra GIC configuration settings
- 	 */
-@@ -124,6 +133,7 @@ void tegra_gic_setup(const interrupt_prop_t *interrupt_props,
-  *****************************************************************************/
- void tegra_gic_init(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	gicv3_distif_init();
- 	gicv3_rdistif_init(plat_my_core_pos());
- 	gicv3_cpuif_enable(plat_my_core_pos());
-@@ -134,6 +144,7 @@ void tegra_gic_init(void)
-  *****************************************************************************/
- void tegra_gic_cpuif_deactivate(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	gicv3_cpuif_disable(plat_my_core_pos());
- }
- 
-@@ -143,6 +154,7 @@ void tegra_gic_cpuif_deactivate(void)
-  *****************************************************************************/
- void tegra_gic_pcpu_init(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	int result;
- 	const uintptr_t *gicr_frames = tegra_gicr_frames;
- 
-@@ -176,6 +188,7 @@ void tegra_gicv3_secure_irq_config_props(
- 		unsigned int interrupt_props_num,
- 		unsigned long long g1s_affinity_val_override)
- {
-+	INFO("Entering %s\n", __func__);
- 	unsigned int i;
- 	const interrupt_prop_t *current_prop;
- 	unsigned long long gic_affinity_val;
-@@ -239,6 +252,7 @@ void tegra_gicv3_secure_irq_config_props(
-  *****************************************************************************/
- void tegra_gic_save(uint32_t pstate_id)
- {
-+	INFO("Entering %s\n", __func__);
- 	gicv3_redist_ctx_t *local_rdist_base;
- 	gicv3_dist_ctx_t *local_dist_base;
- 
-@@ -271,6 +285,7 @@ void tegra_gic_save(uint32_t pstate_id)
- 
- void tegra_gic_restore(uint32_t pstate_id)
- {
-+	INFO("Entering %s\n", __func__);
- 	gicv3_redist_ctx_t *local_rdist_base;
- 	gicv3_dist_ctx_t *local_dist_base;
- 
 diff --git a/plat/nvidia/tegra/common/tegra_io_storage.c b/plat/nvidia/tegra/common/tegra_io_storage.c
-index 21641aa..0ca74ea 100644
+index 21641aa..601db65 100644
 --- a/plat/nvidia/tegra/common/tegra_io_storage.c
 +++ b/plat/nvidia/tegra/common/tegra_io_storage.c
 @@ -4,6 +4,7 @@
@@ -520,15 +207,8 @@ index 21641aa..0ca74ea 100644
  #include <errno.h>
  #include <plat/common/platform.h>
  
-@@ -16,5 +17,6 @@
- int plat_get_image_source(unsigned int image_id, uintptr_t *dev_handle,
- 			  uintptr_t *image_spec)
- {
-+	INFO("Entering %s\n", __func__);
- 	return -ENOTSUP;
- }
 diff --git a/plat/nvidia/tegra/common/tegra_pauth.c b/plat/nvidia/tegra/common/tegra_pauth.c
-index bd7d871..9521472 100644
+index bd7d871..b6f2d2f 100644
 --- a/plat/nvidia/tegra/common/tegra_pauth.c
 +++ b/plat/nvidia/tegra/common/tegra_pauth.c
 @@ -4,6 +4,7 @@
@@ -539,16 +219,8 @@ index bd7d871..9521472 100644
  #include <arch_helpers.h>
  #include <cdefs.h>
  #include <stdint.h>
-@@ -19,6 +20,7 @@
-  */
- uint128_t plat_init_apkey(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint64_t return_addr = (uint64_t)__builtin_return_address(0U);
- 	uint64_t frame_addr = (uint64_t)__builtin_frame_address(0U);
- 	uint64_t fixed_pattern = TEGRA_APKEY_FIXED_PATTERN;
 diff --git a/plat/nvidia/tegra/common/tegra_platform.c b/plat/nvidia/tegra/common/tegra_platform.c
-index 2204925..3a0de64 100644
+index 2204925..3bfdef6 100644
 --- a/plat/nvidia/tegra/common/tegra_platform.c
 +++ b/plat/nvidia/tegra/common/tegra_platform.c
 @@ -5,6 +5,7 @@
@@ -559,195 +231,11 @@ index 2204925..3a0de64 100644
  #include <arch_helpers.h>
  #include <assert.h>
  #include <lib/mmio.h>
-@@ -57,6 +58,7 @@ typedef enum tegra_platform {
-  */
- static uint32_t tegra_get_chipid(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	return mmio_read_32(TEGRA_MISC_BASE + HARDWARE_REVISION_OFFSET);
- }
- 
-@@ -65,6 +67,7 @@ static uint32_t tegra_get_chipid(void)
-  */
- uint32_t tegra_get_chipid_major(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	return (tegra_get_chipid() >> MAJOR_VERSION_SHIFT) & MAJOR_VERSION_MASK;
- }
- 
-@@ -73,6 +76,7 @@ uint32_t tegra_get_chipid_major(void)
-  */
- uint32_t tegra_get_chipid_minor(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	return (tegra_get_chipid() >> MINOR_VERSION_SHIFT) & MINOR_VERSION_MASK;
- }
- 
-@@ -81,11 +85,13 @@ uint32_t tegra_get_chipid_minor(void)
-  */
- static uint32_t tegra_get_chipid_pre_si_platform(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	return (tegra_get_chipid() >> PRE_SI_PLATFORM_SHIFT) & PRE_SI_PLATFORM_MASK;
- }
- 
- bool tegra_chipid_is_t186(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint32_t chip_id = (tegra_get_chipid() >> CHIP_ID_SHIFT) & CHIP_ID_MASK;
- 
- 	return (chip_id == TEGRA_CHIPID_TEGRA18);
-@@ -93,6 +99,7 @@ bool tegra_chipid_is_t186(void)
- 
- bool tegra_chipid_is_t210(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint32_t chip_id = (tegra_get_chipid() >> CHIP_ID_SHIFT) & CHIP_ID_MASK;
- 
- 	return (chip_id == TEGRA_CHIPID_TEGRA21);
-@@ -100,11 +107,13 @@ bool tegra_chipid_is_t210(void)
- 
- bool tegra_chipid_is_t210_b01(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	return (tegra_chipid_is_t210() && (tegra_get_chipid_major() == 0x2U));
- }
- 
- bool tegra_chipid_is_t194(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint32_t chip_id = (tegra_get_chipid() >> CHIP_ID_SHIFT) & CHIP_ID_MASK;
- 
- 	return (chip_id == TEGRA_CHIPID_TEGRA19);
-@@ -112,6 +121,7 @@ bool tegra_chipid_is_t194(void)
- 
- bool tegra_chipid_is_t239(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint32_t chip_id = (tegra_get_chipid() >> CHIP_ID_SHIFT) & CHIP_ID_MASK;
- 
- 	return ((chip_id == TEGRA_CHIPID_TEGRA23) &&
-@@ -124,6 +134,7 @@ bool tegra_chipid_is_t239(void)
- 
- static tegra_platform_t from_hidrev_major_minor_rev(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint32_t major = tegra_get_chipid_major();
- 	uint32_t minor = tegra_get_chipid_minor();
- 	tegra_platform_t ret;
-@@ -190,6 +201,7 @@ static tegra_platform_t from_hidrev_major_minor_rev(void)
- 
- static tegra_platform_t from_hidrev_pre_si_platform(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint32_t pre_si_platform = tegra_get_chipid_pre_si_platform();
- 	tegra_platform_t ret;
- 
-@@ -258,6 +270,7 @@ static tegra_platform_t from_hidrev_pre_si_platform(void)
-  */
- static tegra_platform_t tegra_get_platform(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	tegra_platform_t ret;
- 	uint32_t chip_id;
- 
-@@ -282,16 +295,19 @@ static tegra_platform_t tegra_get_platform(void)
- 
- bool tegra_platform_is_silicon(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	return ((tegra_get_platform() == TEGRA_PLATFORM_SILICON) ? true : false);
- }
- 
- bool tegra_platform_is_qt(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	return ((tegra_get_platform() == TEGRA_PLATFORM_QT) ? true : false);
- }
- 
- bool tegra_platform_is_linsim(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	tegra_platform_t plat = tegra_get_platform();
- 
- 	return (((plat == TEGRA_PLATFORM_LINSIM) ||
-@@ -300,26 +316,31 @@ bool tegra_platform_is_linsim(void)
- 
- bool tegra_platform_is_fpga(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	return ((tegra_get_platform() == TEGRA_PLATFORM_FPGA) ? true : false);
- }
- 
- bool tegra_platform_is_emulation(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	return (tegra_get_platform() == TEGRA_PLATFORM_EMULATION);
- }
- 
- bool tegra_platform_is_unit_fpga(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	return ((tegra_get_platform() == TEGRA_PLATFORM_UNIT_FPGA) ? true : false);
- }
- 
- bool tegra_platform_is_virt_dev_kit(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	return ((tegra_get_platform() == TEGRA_PLATFORM_VIRT_DEV_KIT) ? true : false);
- }
- 
- bool tegra_platform_is_vsp(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	return ((tegra_get_platform() == TEGRA_PLATFORM_VSP) ? true : false);
- }
- 
-@@ -332,6 +353,7 @@ bool tegra_platform_is_vsp(void)
-  */
- int32_t plat_get_soc_version(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint32_t chip_id = (tegra_get_chipid() >> CHIP_ID_SHIFT) & CHIP_ID_MASK;
- 	uint32_t major_rev = tegra_get_chipid_major();
- 	uint32_t manfid = SOC_ID_SET_JEP_106(JEDEC_NVIDIA_BKID, JEDEC_NVIDIA_MFID);
-@@ -348,6 +370,7 @@ int32_t plat_get_soc_version(void)
-  */
- int32_t plat_get_soc_revision(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	return (int32_t)(((tegra_get_chipid_major() << 8) | tegra_get_chipid_minor()) &
- 			 SOC_ID_REV_MASK);
- }
-@@ -362,6 +385,7 @@ int32_t plat_get_soc_revision(void)
-  *****************************************************************************/
- int32_t plat_is_smccc_feature_available(u_register_t fid)
- {
-+	INFO("Entering %s\n", __func__);
- 	switch (fid) {
- 	case SMCCC_ARCH_SOC_ID:
- 		return SMC_ARCH_CALL_SUCCESS;
 diff --git a/plat/nvidia/tegra/common/tegra_pm.c b/plat/nvidia/tegra/common/tegra_pm.c
-index f00cce2..383719c 100644
+index f00cce2..c404cbf 100644
 --- a/plat/nvidia/tegra/common/tegra_pm.c
 +++ b/plat/nvidia/tegra/common/tegra_pm.c
-@@ -36,6 +36,7 @@ extern uint64_t tegra_sec_entry_point;
- ******************************************************************************/
- static void tegra_get_sys_suspend_power_state(psci_power_state_t *req_state)
- {
-+	INFO("Entering %s\n", __func__);
- 	/* all affinities use system suspend state id */
- 	for (uint32_t i = MPIDR_AFFLVL0; i <= PLAT_MAX_PWR_LVL; i++) {
- 		req_state->pwr_domain_state[i] = PSTATE_ID_SOC_POWERDN;
-@@ -47,6 +48,7 @@ static void tegra_get_sys_suspend_power_state(psci_power_state_t *req_state)
-  ******************************************************************************/
- static void tegra_cpu_standby(plat_local_state_t cpu_state)
- {
-+	INFO("Entering %s\n", __func__);
- 	u_register_t saved_scr_el3;
- 
- 	(void)cpu_state;
-@@ -86,6 +88,7 @@ static void tegra_cpu_standby(plat_local_state_t cpu_state)
+@@ -86,6 +86,7 @@ static void tegra_cpu_standby(plat_local_state_t cpu_state)
   ******************************************************************************/
  static int32_t tegra_pwr_domain_on(u_register_t mpidr)
  {
@@ -755,127 +243,8 @@ index f00cce2..383719c 100644
  	return tegra_soc_pwr_domain_on(mpidr);
  }
  
-@@ -95,6 +98,7 @@ static int32_t tegra_pwr_domain_on(u_register_t mpidr)
-  ******************************************************************************/
- static void tegra_pwr_domain_off(const psci_power_state_t *target_state)
- {
-+	INFO("Entering %s\n", __func__);
- 	(void)tegra_soc_pwr_domain_off(target_state);
- 
- 	/* disable GICC */
-@@ -112,6 +116,7 @@ static void tegra_pwr_domain_off(const psci_power_state_t *target_state)
-  ******************************************************************************/
- void tegra_pwr_domain_suspend_pwrdown_early(const psci_power_state_t *target_state)
- {
-+	INFO("Entering %s\n", __func__);
- 	tegra_soc_pwr_domain_suspend_pwrdown_early(target_state);
- }
- 
-@@ -121,6 +126,7 @@ void tegra_pwr_domain_suspend_pwrdown_early(const psci_power_state_t *target_sta
-  ******************************************************************************/
- static void tegra_pwr_domain_suspend(const psci_power_state_t *target_state)
- {
-+	INFO("Entering %s\n", __func__);
- 	(void)tegra_soc_pwr_domain_suspend(target_state);
- 
- 	/* disable GICC */
-@@ -137,6 +143,7 @@ static void tegra_pwr_domain_suspend(const psci_power_state_t *target_state)
- static __dead2 void tegra_pwr_domain_power_down_wfi(const psci_power_state_t
- 					     *target_state)
- {
-+	INFO("Entering %s\n", __func__);
- 	/* call the chip's power down handler */
- 	(void)tegra_soc_pwr_domain_power_down_wfi(target_state);
- 
-@@ -159,6 +166,7 @@ static __dead2 void tegra_pwr_domain_power_down_wfi(const psci_power_state_t
-  ******************************************************************************/
- static void tegra_pwr_domain_on_finish(const psci_power_state_t *target_state)
- {
-+	INFO("Entering %s\n", __func__);
- 	const bl31_plat_params_t *plat_params;
- 
- 	/*
-@@ -213,6 +221,7 @@ static void tegra_pwr_domain_on_finish(const psci_power_state_t *target_state)
-  ******************************************************************************/
- static void tegra_pwr_domain_suspend_finish(const psci_power_state_t *target_state)
- {
-+	INFO("Entering %s\n", __func__);
- 	tegra_pwr_domain_on_finish(target_state);
- }
- 
-@@ -221,6 +230,7 @@ static void tegra_pwr_domain_suspend_finish(const psci_power_state_t *target_sta
-  ******************************************************************************/
- static __dead2 void tegra_system_off(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	INFO("Powering down system...\n");
- 
- 	tegra_soc_prepare_system_off();
-@@ -231,6 +241,7 @@ static __dead2 void tegra_system_off(void)
-  ******************************************************************************/
- static __dead2 void tegra_system_reset(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	INFO("Restarting system...\n");
- 
- 	/* per-SoC system reset handler */
-@@ -248,6 +259,7 @@ static __dead2 void tegra_system_reset(void)
- static int32_t tegra_validate_power_state(uint32_t power_state,
- 				   psci_power_state_t *req_state)
- {
-+	INFO("Entering %s\n", __func__);
- 	assert(req_state != NULL);
- 
- 	return tegra_soc_validate_power_state(power_state, req_state);
-@@ -258,6 +270,7 @@ static int32_t tegra_validate_power_state(uint32_t power_state,
-  ******************************************************************************/
- static int32_t tegra_validate_ns_entrypoint(uintptr_t entrypoint)
- {
-+	INFO("Entering %s\n", __func__);
- 	return tegra_soc_validate_ns_entrypoint(entrypoint);
- }
- 
-@@ -286,6 +299,7 @@ static plat_psci_ops_t tegra_plat_psci_ops = {
- int plat_setup_psci_ops(uintptr_t sec_entrypoint,
- 			const plat_psci_ops_t **psci_ops)
- {
-+	INFO("Entering %s\n", __func__);
- 	psci_power_state_t target_state = { { PSCI_LOCAL_STATE_RUN } };
- 
- 	/*
-@@ -324,5 +338,6 @@ plat_local_state_t plat_get_target_pwr_state(unsigned int lvl,
- 					     const plat_local_state_t *states,
- 					     unsigned int ncpu)
- {
-+	INFO("Entering %s\n", __func__);
- 	return tegra_soc_get_target_pwr_state(lvl, states, ncpu);
- }
-diff --git a/plat/nvidia/tegra/common/tegra_sdei.c b/plat/nvidia/tegra/common/tegra_sdei.c
-index 9241b81..cd64db7 100644
---- a/plat/nvidia/tegra/common/tegra_sdei.c
-+++ b/plat/nvidia/tegra/common/tegra_sdei.c
-@@ -49,6 +49,7 @@ static sdei_ev_map_t tegra_sdei_shared[] = {
- 
- void plat_sdei_setup(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	INFO("SDEI platform setup\n");
- }
- 
-diff --git a/plat/nvidia/tegra/common/tegra_sip_calls.c b/plat/nvidia/tegra/common/tegra_sip_calls.c
-index 80a2c4d..c23180a 100644
---- a/plat/nvidia/tegra/common/tegra_sip_calls.c
-+++ b/plat/nvidia/tegra/common/tegra_sip_calls.c
-@@ -38,6 +38,7 @@ uintptr_t tegra_sip_handler(uint32_t smc_fid,
- 			    void *handle,
- 			    u_register_t flags)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint32_t regval, local_x2_32 = (uint32_t)x2;
- 	int32_t err;
- 
 diff --git a/plat/nvidia/tegra/common/tegra_stack_protector.c b/plat/nvidia/tegra/common/tegra_stack_protector.c
-index f6c459a..97b4d49 100644
+index f6c459a..b31a898 100644
 --- a/plat/nvidia/tegra/common/tegra_stack_protector.c
 +++ b/plat/nvidia/tegra/common/tegra_stack_protector.c
 @@ -4,6 +4,7 @@
@@ -886,890 +255,6 @@ index f6c459a..97b4d49 100644
  #include <stdint.h>
  
  #include <arch_helpers.h>
-@@ -13,6 +14,7 @@
- 
- u_register_t plat_get_stack_protector_canary(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	u_register_t seed;
- 
- 	/*
-diff --git a/plat/nvidia/tegra/drivers/bpmp/bpmp.c b/plat/nvidia/tegra/drivers/bpmp/bpmp.c
-index d7db604..e56dc12 100644
---- a/plat/nvidia/tegra/drivers/bpmp/bpmp.c
-+++ b/plat/nvidia/tegra/drivers/bpmp/bpmp.c
-@@ -23,26 +23,31 @@ static uint32_t bpmp_init_state = BPMP_INIT_PENDING;
- 
- static uint32_t channel_field(unsigned int ch)
- {
-+	INFO("Entering %s\n", __func__);
- 	return mmio_read_32(TEGRA_RES_SEMA_BASE + STA_OFFSET) & CH_MASK(ch);
- }
- 
- static bool master_free(unsigned int ch)
- {
-+	INFO("Entering %s\n", __func__);
- 	return channel_field(ch) == MA_FREE(ch);
- }
- 
- static bool master_acked(unsigned int ch)
- {
-+	INFO("Entering %s\n", __func__);
- 	return channel_field(ch) == MA_ACKD(ch);
- }
- 
- static void signal_slave(unsigned int ch)
- {
-+	INFO("Entering %s\n", __func__);
- 	mmio_write_32(TEGRA_RES_SEMA_BASE + CLR_OFFSET, CH_MASK(ch));
- }
- 
- static void free_master(unsigned int ch)
- {
-+	INFO("Entering %s\n", __func__);
- 	mmio_write_32(TEGRA_RES_SEMA_BASE + CLR_OFFSET,
- 		      MA_ACKD(ch) ^ MA_FREE(ch));
- }
-@@ -51,6 +56,7 @@ static void free_master(unsigned int ch)
- int32_t tegra_bpmp_send_receive_atomic(int mrq, const void *ob_data, int ob_sz,
- 		void *ib_data, int ib_sz)
- {
-+	INFO("Entering %s\n", __func__);
- 	unsigned int ch = (unsigned int)plat_my_core_pos();
- 	mb_data_t *p = (mb_data_t *)(uintptr_t)channel_base[ch];
- 	int32_t ret = -ETIMEDOUT, timeout = 0;
-@@ -115,6 +121,7 @@ int32_t tegra_bpmp_send_receive_atomic(int mrq, const void *ob_data, int ob_sz,
- 
- int tegra_bpmp_init(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint32_t val, base, timeout = BPMP_TIMEOUT;
- 	unsigned int ch;
- 	int ret = 0;
-@@ -189,6 +196,7 @@ int tegra_bpmp_init(void)
- 
- void tegra_bpmp_suspend(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	/* freeze the interface */
- 	if (bpmp_init_state == BPMP_INIT_COMPLETE) {
- 		bpmp_init_state = BPMP_SUSPEND_ENTRY;
-@@ -199,6 +207,7 @@ void tegra_bpmp_suspend(void)
- 
- void tegra_bpmp_resume(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint32_t val, timeout = 0;
- 
- 	if (bpmp_init_state == BPMP_SUSPEND_ENTRY) {
-diff --git a/plat/nvidia/tegra/drivers/bpmp_ipc/intf.c b/plat/nvidia/tegra/drivers/bpmp_ipc/intf.c
-index 8204334..99f0cd1 100644
---- a/plat/nvidia/tegra/drivers/bpmp_ipc/intf.c
-+++ b/plat/nvidia/tegra/drivers/bpmp_ipc/intf.c
-@@ -43,6 +43,7 @@ static uint32_t num_sockets = 1U;
- 
- static inline uint32_t get_my_socket_id(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	return MPIDR_AFFLVL3_VAL(read_mpidr());
- }
- 
-@@ -51,6 +52,7 @@ static inline uint32_t get_my_socket_id(void)
-  */
- static inline uint32_t hsp_db_read(uint32_t socket, uint32_t reg)
- {
-+	INFO("Entering %s\n", __func__);
- 	return mmio_read_32(TEGRA_HSP_DBELL_BASE + reg +
- 			TEGRA_REMOTE_CHIP_MEM_OFFSET(socket));
- 
-@@ -58,6 +60,7 @@ static inline uint32_t hsp_db_read(uint32_t socket, uint32_t reg)
- 
- static inline void hsp_db_write(uint32_t socket, uint32_t reg, uint32_t val)
- {
-+	INFO("Entering %s\n", __func__);
- 	mmio_write_32((TEGRA_HSP_DBELL_BASE + reg +
- 			TEGRA_REMOTE_CHIP_MEM_OFFSET(socket)), val);
- }
-@@ -73,6 +76,7 @@ static void tegra_bpmp_ring_bpmp_doorbell(uint32_t socket);
-  */
- static struct frame_data *tegra_bpmp_get_next_out_frame(uint32_t socket)
- {
-+	INFO("Entering %s\n", __func__);
- 	struct frame_data *frame;
- 	const struct ivc *ch = &ivc_ccplex_bpmp_channel[socket];
- 
-@@ -88,17 +92,20 @@ static struct frame_data *tegra_bpmp_get_next_out_frame(uint32_t socket)
- 
- static void tegra_bpmp_signal_slave(uint32_t socket)
- {
-+	INFO("Entering %s\n", __func__);
- 	(void)tegra_ivc_write_advance(&ivc_ccplex_bpmp_channel[socket]);
- 	tegra_bpmp_ring_bpmp_doorbell(socket);
- }
- 
- static int32_t tegra_bpmp_free_master(uint32_t socket)
- {
-+	INFO("Entering %s\n", __func__);
- 	return tegra_ivc_read_advance(&ivc_ccplex_bpmp_channel[socket]);
- }
- 
- static bool tegra_bpmp_slave_acked(uint32_t socket)
- {
-+	INFO("Entering %s\n", __func__);
- 	struct frame_data *frame;
- 	bool ret = true;
- 
-@@ -114,6 +121,7 @@ static bool tegra_bpmp_slave_acked(uint32_t socket)
- 
- static struct frame_data *tegra_bpmp_get_cur_in_frame(uint32_t socket)
- {
-+	INFO("Entering %s\n", __func__);
- 	return s_channel[socket].ib;
- }
- 
-@@ -127,6 +135,7 @@ static struct frame_data *tegra_bpmp_get_cur_in_frame(uint32_t socket)
-  */
- static void tegra_bpmp_enable_ccplex_doorbell(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint32_t reg;
- 	uint32_t socket = get_my_socket_id();
- 
-@@ -140,6 +149,7 @@ static void tegra_bpmp_enable_ccplex_doorbell(void)
-  */
- static void tegra_bpmp_ring_bpmp_doorbell(uint32_t socket)
- {
-+	INFO("Entering %s\n", __func__);
- 	/*
- 	 * Any writes to this register has the same effect,
- 	 * uses master ID of the write transaction and set
-@@ -154,6 +164,7 @@ static void tegra_bpmp_ring_bpmp_doorbell(uint32_t socket)
-  */
- static bool tegra_bpmp_can_ccplex_ring_doorbell(uint32_t socket)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint32_t reg;
- 
- 	/* check if ccplex can communicate with bpmp */
-@@ -164,6 +175,7 @@ static bool tegra_bpmp_can_ccplex_ring_doorbell(uint32_t socket)
- 
- static int32_t tegra_bpmp_wait_for_slave_ack(uint32_t socket)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint32_t timeout = TIMEOUT_RESPONSE_FROM_BPMP_US;
- 
- 	while (!tegra_bpmp_slave_acked(socket) && (timeout != 0U)) {
-@@ -179,6 +191,7 @@ static int32_t tegra_bpmp_wait_for_slave_ack(uint32_t socket)
-  */
- static void tegra_bpmp_ivc_notify(const struct ivc *ivc)
- {
-+	INFO("Entering %s\n", __func__);
- 	(void)(ivc);
- 
- 	tegra_bpmp_ring_bpmp_doorbell(ivc->socket);
-@@ -190,6 +203,7 @@ static void tegra_bpmp_ivc_notify(const struct ivc *ivc)
- static void tegra_bpmp_ipc_send_req_no_resp(uint32_t mrq, void *p_out,
- 				uint32_t size_out, uint32_t socket)
- {
-+	INFO("Entering %s\n", __func__);
- 	struct frame_data *frame = tegra_bpmp_get_next_out_frame(socket);
- 	void *p_fdata;
- 
-@@ -218,6 +232,7 @@ static int32_t tegra_bpmp_ipc_send_req_atomic(uint32_t mrq, void *p_out,
- 			uint32_t size_out, void *p_in, uint32_t size_in,
- 			uint32_t socket)
- {
-+	INFO("Entering %s\n", __func__);
- 	struct frame_data *frame = tegra_bpmp_get_next_out_frame(socket);
- 	struct frame_data *f_in = NULL;
- 	int32_t ret = 0;
-@@ -272,6 +287,7 @@ static int32_t tegra_bpmp_ipc_send_req_atomic(uint32_t mrq, void *p_out,
-  */
- static int32_t tegra_bpmp_ipc_init_one(uint32_t socket)
- {
-+	INFO("Entering %s\n", __func__);
- 	size_t msg_size;
- 	uint32_t frame_size, timeout;
- 	int32_t error = 0;
-@@ -336,6 +352,7 @@ static int32_t tegra_bpmp_ipc_init_one(uint32_t socket)
- 
- int32_t tegra_bpmp_ipc_init(uint32_t socket_count)
- {
-+	INFO("Entering %s\n", __func__);
- 	int32_t ret = 0;
- 	uint32_t socket;
- 
-@@ -354,6 +371,7 @@ int32_t tegra_bpmp_ipc_init(uint32_t socket_count)
- /* Handler to reset a hardware module */
- int32_t tegra_bpmp_ipc_reset_module(uint32_t rst_id)
- {
-+	INFO("Entering %s\n", __func__);
- 	int32_t ret;
- 	struct mrq_reset_request req = {
- 		.cmd = (uint32_t)CMD_RESET_MODULE,
-@@ -377,6 +395,7 @@ int32_t tegra_bpmp_ipc_reset_module(uint32_t rst_id)
- /* Handler to enable clock for a given ID */
- int tegra_bpmp_ipc_enable_clock(uint32_t clk_id)
- {
-+	INFO("Entering %s\n", __func__);
- 	int ret;
- 	struct mrq_clk_request req;
- 	struct cmd_clk_is_en_resp resp = { 0 };
-@@ -412,6 +431,7 @@ int tegra_bpmp_ipc_enable_clock(uint32_t clk_id)
- /* Handler to disable clock for a given ID */
- int tegra_bpmp_ipc_disable_clock(uint32_t clk_id)
- {
-+	INFO("Entering %s\n", __func__);
- 	int ret;
- 	struct mrq_clk_request req;
- 
-@@ -435,6 +455,7 @@ int tegra_bpmp_ipc_disable_clock(uint32_t clk_id)
- 
- void tegra_bpmp_ipc_system_shutdown(uint32_t state)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint32_t socket, my_socket;
- 	struct mrq_shutdown_request req;
- 
-@@ -459,6 +480,7 @@ void tegra_bpmp_ipc_system_shutdown(uint32_t state)
- /* Handler to retrieve thresholds for NDIV offsets */
- int tegra_bpmp_ipc_get_ndiv_offsets(uint32_t socket, struct mrq_gears_response *resp)
- {
-+	INFO("Entering %s\n", __func__);
- 	int ret;
- 	uint32_t req = 0U;
- 
-diff --git a/plat/nvidia/tegra/drivers/bpmp_ipc/ivc.c b/plat/nvidia/tegra/drivers/bpmp_ipc/ivc.c
-index d964fc0..cb185fe 100644
---- a/plat/nvidia/tegra/drivers/bpmp_ipc/ivc.c
-+++ b/plat/nvidia/tegra/drivers/bpmp_ipc/ivc.c
-@@ -74,6 +74,7 @@ struct ivc_channel_header {
- static inline bool ivc_channel_empty(const struct ivc *ivc,
- 		volatile const struct ivc_channel_header *ch)
- {
-+	INFO("Entering %s\n", __func__);
- 	/*
- 	 * This function performs multiple checks on the same values with
- 	 * security implications, so sample the counters' current values in
-@@ -105,6 +106,7 @@ static inline bool ivc_channel_empty(const struct ivc *ivc,
- static inline bool ivc_channel_full(const struct ivc *ivc,
- 		volatile const struct ivc_channel_header *ch)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint32_t wr_count = ch->w_count;
- 	uint32_t rd_count = ch->r_count;
- 
-@@ -120,6 +122,7 @@ static inline bool ivc_channel_full(const struct ivc *ivc,
- static inline uint32_t ivc_channel_avail_count(const struct ivc *ivc,
- 		volatile const struct ivc_channel_header *ch)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint32_t wr_count = ch->w_count;
- 	uint32_t rd_count = ch->r_count;
- 
-@@ -136,6 +139,7 @@ static inline uint32_t ivc_channel_avail_count(const struct ivc *ivc,
- 
- static inline void ivc_advance_tx(struct ivc *ivc)
- {
-+	INFO("Entering %s\n", __func__);
- 	ivc->tx_channel->w_count++;
- 
- 	if (ivc->w_pos == (ivc->nframes - (uint32_t)1U)) {
-@@ -147,6 +151,7 @@ static inline void ivc_advance_tx(struct ivc *ivc)
- 
- static inline void ivc_advance_rx(struct ivc *ivc)
- {
-+	INFO("Entering %s\n", __func__);
- 	ivc->rx_channel->r_count++;
- 
- 	if (ivc->r_pos == (ivc->nframes - (uint32_t)1U)) {
-@@ -158,6 +163,7 @@ static inline void ivc_advance_rx(struct ivc *ivc)
- 
- static inline int32_t ivc_check_read(const struct ivc *ivc)
- {
-+	INFO("Entering %s\n", __func__);
- 	/*
- 	 * tx_channel->state is set locally, so it is not synchronized with
- 	 * state from the remote peer. The remote peer cannot reset its
-@@ -185,6 +191,7 @@ static inline int32_t ivc_check_read(const struct ivc *ivc)
- 
- static inline int32_t ivc_check_write(const struct ivc *ivc)
- {
-+	INFO("Entering %s\n", __func__);
- 	if (ivc->tx_channel->state != ivc_state_established) {
- 		return -ECONNRESET;
- 	}
-@@ -198,22 +205,26 @@ static inline int32_t ivc_check_write(const struct ivc *ivc)
- 
- bool tegra_ivc_can_read(const struct ivc *ivc)
- {
-+	INFO("Entering %s\n", __func__);
- 	return ivc_check_read(ivc) == 0;
- }
- 
- bool tegra_ivc_can_write(const struct ivc *ivc)
- {
-+	INFO("Entering %s\n", __func__);
- 	return ivc_check_write(ivc) == 0;
- }
- 
- bool tegra_ivc_tx_empty(const struct ivc *ivc)
- {
-+	INFO("Entering %s\n", __func__);
- 	return ivc_channel_empty(ivc, ivc->tx_channel);
- }
- 
- static inline uintptr_t calc_frame_offset(uint32_t frame_index,
- 	uint32_t frame_size, uint32_t frame_offset)
- {
-+	INFO("Entering %s\n", __func__);
-     return ((uintptr_t)frame_index * (uintptr_t)frame_size) +
- 	    (uintptr_t)frame_offset;
- }
-@@ -222,6 +233,7 @@ static void *ivc_frame_pointer(const struct ivc *ivc,
- 				volatile const struct ivc_channel_header *ch,
- 				uint32_t frame)
- {
-+	INFO("Entering %s\n", __func__);
- 	assert(frame < ivc->nframes);
- 	return (void *)((uintptr_t)(&ch[1]) +
- 		calc_frame_offset(frame, ivc->frame_size, 0));
-@@ -229,6 +241,7 @@ static void *ivc_frame_pointer(const struct ivc *ivc,
- 
- int32_t tegra_ivc_read(struct ivc *ivc, void *buf, size_t max_read)
- {
-+	INFO("Entering %s\n", __func__);
- 	const void *src;
- 	int32_t result;
- 
-@@ -277,6 +290,7 @@ int32_t tegra_ivc_read(struct ivc *ivc, void *buf, size_t max_read)
- /* directly peek at the next frame rx'ed */
- void *tegra_ivc_read_get_next_frame(const struct ivc *ivc)
- {
-+	INFO("Entering %s\n", __func__);
- 	if (ivc_check_read(ivc) != 0) {
- 		return NULL;
- 	}
-@@ -292,6 +306,7 @@ void *tegra_ivc_read_get_next_frame(const struct ivc *ivc)
- 
- int32_t tegra_ivc_read_advance(struct ivc *ivc)
- {
-+	INFO("Entering %s\n", __func__);
- 	/*
- 	 * No read barriers or synchronization here: the caller is expected to
- 	 * have already observed the channel non-empty. This check is just to
-@@ -323,6 +338,7 @@ int32_t tegra_ivc_read_advance(struct ivc *ivc)
- 
- int32_t tegra_ivc_write(struct ivc *ivc, const void *buf, size_t size)
- {
-+	INFO("Entering %s\n", __func__);
- 	void *p;
- 	int32_t result;
- 
-@@ -372,6 +388,7 @@ int32_t tegra_ivc_write(struct ivc *ivc, const void *buf, size_t size)
- /* directly poke at the next frame to be tx'ed */
- void *tegra_ivc_write_get_next_frame(const struct ivc *ivc)
- {
-+	INFO("Entering %s\n", __func__);
- 	if (ivc_check_write(ivc) != 0) {
- 		return NULL;
- 	}
-@@ -382,6 +399,7 @@ void *tegra_ivc_write_get_next_frame(const struct ivc *ivc)
- /* advance the tx buffer */
- int32_t tegra_ivc_write_advance(struct ivc *ivc)
- {
-+	INFO("Entering %s\n", __func__);
- 	int32_t result = ivc_check_write(ivc);
- 
- 	if (result != 0) {
-@@ -414,6 +432,7 @@ int32_t tegra_ivc_write_advance(struct ivc *ivc)
- 
- void tegra_ivc_channel_reset(const struct ivc *ivc)
- {
-+	INFO("Entering %s\n", __func__);
- 	ivc->tx_channel->state = ivc_state_sync;
- 	ivc->notify(ivc);
- }
-@@ -439,6 +458,7 @@ void tegra_ivc_channel_reset(const struct ivc *ivc)
-  */
- int32_t tegra_ivc_channel_notified(struct ivc *ivc)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint32_t peer_state;
- 
- 	/* Copy the receiver's state out of shared memory. */
-@@ -551,11 +571,13 @@ int32_t tegra_ivc_channel_notified(struct ivc *ivc)
- 
- size_t tegra_ivc_align(size_t size)
- {
-+	INFO("Entering %s\n", __func__);
- 	return (size + (IVC_ALIGN - 1U)) & ~(IVC_ALIGN - 1U);
- }
- 
- size_t tegra_ivc_total_queue_size(size_t queue_size)
- {
-+	INFO("Entering %s\n", __func__);
- 	if ((queue_size & (IVC_ALIGN - 1U)) != 0U) {
- 		ERROR("queue_size (%d) must be %d-byte aligned\n",
- 				(int32_t)queue_size, IVC_ALIGN);
-@@ -567,6 +589,7 @@ size_t tegra_ivc_total_queue_size(size_t queue_size)
- static int32_t check_ivc_params(uintptr_t queue_base1, uintptr_t queue_base2,
- 		uint32_t nframes, uint32_t frame_size)
- {
-+	INFO("Entering %s\n", __func__);
- 	assert((offsetof(struct ivc_channel_header, w_count)
- 				& (IVC_ALIGN - 1U)) == 0U);
- 	assert((offsetof(struct ivc_channel_header, r_count)
-@@ -620,6 +643,7 @@ int32_t tegra_ivc_init(struct ivc *ivc, uintptr_t rx_base, uintptr_t tx_base,
- 		uint32_t nframes, uint32_t frame_size,
- 		ivc_notify_function notify)
- {
-+	INFO("Entering %s\n", __func__);
- 	int32_t result;
- 
- 	/* sanity check input params */
-diff --git a/plat/nvidia/tegra/drivers/flowctrl/flowctrl.c b/plat/nvidia/tegra/drivers/flowctrl/flowctrl.c
-index 8f55554..acfd2ec 100644
---- a/plat/nvidia/tegra/drivers/flowctrl/flowctrl.c
-+++ b/plat/nvidia/tegra/drivers/flowctrl/flowctrl.c
-@@ -46,24 +46,28 @@ static const uint64_t flowctrl_offset_cc4_ctrl[4] = {
- 
- static inline void tegra_fc_cc4_ctrl(int cpu_id, uint32_t val)
- {
-+	INFO("Entering %s\n", __func__);
- 	mmio_write_32(flowctrl_offset_cc4_ctrl[cpu_id], val);
- 	val = mmio_read_32(flowctrl_offset_cc4_ctrl[cpu_id]);
- }
- 
- static inline void tegra_fc_cpu_csr(int cpu_id, uint32_t val)
- {
-+	INFO("Entering %s\n", __func__);
- 	mmio_write_32(flowctrl_offset_cpu_csr[cpu_id], val);
- 	val = mmio_read_32(flowctrl_offset_cpu_csr[cpu_id]);
- }
- 
- static inline void tegra_fc_halt_cpu(int cpu_id, uint32_t val)
- {
-+	INFO("Entering %s\n", __func__);
- 	mmio_write_32(flowctrl_offset_halt_cpu[cpu_id], val);
- 	val = mmio_read_32(flowctrl_offset_halt_cpu[cpu_id]);
- }
- 
- static void tegra_fc_prepare_suspend(int cpu_id, uint32_t csr)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint32_t val;
- 
- 	val = FLOWCTRL_HALT_GIC_IRQ | FLOWCTRL_HALT_GIC_FIQ |
-@@ -83,6 +87,7 @@ static void tegra_fc_prepare_suspend(int cpu_id, uint32_t csr)
-  ******************************************************************************/
- void tegra_fc_ccplex_pgexit_lock(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	unsigned int i, cpu = read_mpidr() & MPIDR_CPU_MASK;
- 	uint32_t flags = tegra_fc_read_32(FLOWCTRL_FC_SEQ_INTERCEPT) & ~INTERCEPT_IRQ_PENDING;;
- 	uint32_t icept_cpu_flags[] = {
-@@ -112,6 +117,7 @@ void tegra_fc_ccplex_pgexit_lock(void)
-  ******************************************************************************/
- void tegra_fc_ccplex_pgexit_unlock(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	/* clear lock bits, clear pending interrupts */
- 	tegra_fc_write_32(FLOWCTRL_FC_SEQ_INTERCEPT, INTERCEPT_IRQ_PENDING);
- 	(void)tegra_fc_read_32(FLOWCTRL_FC_SEQ_INTERCEPT);
-@@ -122,6 +128,7 @@ void tegra_fc_ccplex_pgexit_unlock(void)
-  ******************************************************************************/
- void tegra_fc_cpu_powerdn(uint32_t mpidr)
- {
-+	INFO("Entering %s\n", __func__);
- 	int cpu = mpidr & MPIDR_CPU_MASK;
- 
- 	VERBOSE("CPU%d powering down...\n", cpu);
-@@ -133,6 +140,7 @@ void tegra_fc_cpu_powerdn(uint32_t mpidr)
-  ******************************************************************************/
- void tegra_fc_cluster_idle(uint32_t mpidr)
- {
-+	INFO("Entering %s\n", __func__);
- 	int cpu = mpidr & MPIDR_CPU_MASK;
- 	uint32_t val;
- 
-@@ -154,6 +162,7 @@ void tegra_fc_cluster_idle(uint32_t mpidr)
-  ******************************************************************************/
- void tegra_fc_cluster_powerdn(uint32_t mpidr)
- {
-+	INFO("Entering %s\n", __func__);
- 	int cpu = mpidr & MPIDR_CPU_MASK;
- 	uint32_t val;
- 
-@@ -175,6 +184,7 @@ void tegra_fc_cluster_powerdn(uint32_t mpidr)
-  ******************************************************************************/
- bool tegra_fc_is_ccx_allowed(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	unsigned int i, cpu = read_mpidr() & MPIDR_CPU_MASK;
- 	uint32_t val;
- 	bool ccx_allowed = true;
-@@ -200,6 +210,7 @@ bool tegra_fc_is_ccx_allowed(void)
-  ******************************************************************************/
- void tegra_fc_soc_powerdn(uint32_t mpidr)
- {
-+	INFO("Entering %s\n", __func__);
- 	int cpu = mpidr & MPIDR_CPU_MASK;
- 	uint32_t val;
- 
-@@ -221,6 +232,7 @@ void tegra_fc_soc_powerdn(uint32_t mpidr)
-  ******************************************************************************/
- void tegra_fc_cpu_on(int cpu)
- {
-+	INFO("Entering %s\n", __func__);
- 	tegra_fc_cpu_csr(cpu, FLOWCTRL_CSR_ENABLE);
- 	tegra_fc_halt_cpu(cpu, FLOWCTRL_WAITEVENT | FLOWCTRL_HALT_SCLK);
- }
-@@ -230,6 +242,7 @@ void tegra_fc_cpu_on(int cpu)
-  ******************************************************************************/
- void tegra_fc_cpu_off(int cpu)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint32_t val;
- 
- 	/*
-@@ -248,6 +261,7 @@ void tegra_fc_cpu_off(int cpu)
-  ******************************************************************************/
- void tegra_fc_lock_active_cluster(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint32_t val;
- 
- 	val = tegra_fc_read_32(FLOWCTRL_BPMP_CLUSTER_CONTROL);
-@@ -261,6 +275,7 @@ void tegra_fc_lock_active_cluster(void)
-  ******************************************************************************/
- void tegra_fc_bpmp_on(uint32_t entrypoint)
- {
-+	INFO("Entering %s\n", __func__);
- 	/* halt BPMP */
- 	tegra_fc_write_32(FLOWCTRL_HALT_BPMP_EVENTS, FLOWCTRL_WAITEVENT);
- 
-@@ -287,6 +302,7 @@ void tegra_fc_bpmp_on(uint32_t entrypoint)
-  ******************************************************************************/
- void tegra_fc_bpmp_off(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	/* halt BPMP */
- 	tegra_fc_write_32(FLOWCTRL_HALT_BPMP_EVENTS, FLOWCTRL_WAITEVENT);
- 
-@@ -304,6 +320,7 @@ void tegra_fc_bpmp_off(void)
-  ******************************************************************************/
- void tegra_fc_enable_fiq_to_ccplex_routing(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint32_t val = tegra_fc_read_32(FLOW_CTLR_FLOW_DBG_QUAL);
- 
- 	/* set the bit to pass FIQs to the GICD */
-@@ -315,6 +332,7 @@ void tegra_fc_enable_fiq_to_ccplex_routing(void)
-  ******************************************************************************/
- void tegra_fc_disable_fiq_to_ccplex_routing(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint32_t val = tegra_fc_read_32(FLOW_CTLR_FLOW_DBG_QUAL);
- 
- 	/* clear the bit to pass FIQs to the GICD */
-diff --git a/plat/nvidia/tegra/drivers/gpcdma/gpcdma.c b/plat/nvidia/tegra/drivers/gpcdma/gpcdma.c
-index d68cdfd..db89e52 100644
---- a/plat/nvidia/tegra/drivers/gpcdma/gpcdma.c
-+++ b/plat/nvidia/tegra/drivers/gpcdma/gpcdma.c
-@@ -57,16 +57,19 @@ static bool init_done;
- 
- static void tegra_gpcdma_write32(uint32_t offset, uint32_t val)
- {
-+	INFO("Entering %s\n", __func__);
- 	mmio_write_32(TEGRA_GPCDMA_BASE + offset, val);
- }
- 
- static uint32_t tegra_gpcdma_read32(uint32_t offset)
- {
-+	INFO("Entering %s\n", __func__);
- 	return mmio_read_32(TEGRA_GPCDMA_BASE + offset);
- }
- 
- static void tegra_gpcdma_init(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	/* assert reset for DMA engine */
- 	mmio_write_32(TEGRA_CAR_RESET_BASE + TEGRA_GPCDMA_RST_SET_REG_OFFSET,
- 		      GPCDMA_RESET_BIT);
-@@ -81,6 +84,7 @@ static void tegra_gpcdma_init(void)
- static void tegra_gpcdma_memcpy_priv(uint64_t dst_addr, uint64_t src_addr,
- 				     uint32_t num_bytes, uint32_t mode)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint32_t val, timeout = 0;
- 	int32_t ret = 0;
- 
-@@ -174,6 +178,7 @@ static void tegra_gpcdma_memcpy_priv(uint64_t dst_addr, uint64_t src_addr,
- void tegra_gpcdma_memcpy(uint64_t dst_addr, uint64_t src_addr,
- 			 uint32_t num_bytes)
- {
-+	INFO("Entering %s\n", __func__);
- 	tegra_gpcdma_memcpy_priv(dst_addr, src_addr, num_bytes,
- 				 DMA_CH_CSR_DMA_MODE_MEM2MEM);
- }
-@@ -183,6 +188,7 @@ void tegra_gpcdma_memcpy(uint64_t dst_addr, uint64_t src_addr,
-  ******************************************************************************/
- void tegra_gpcdma_zeromem(uint64_t dst_addr, uint32_t num_bytes)
- {
-+	INFO("Entering %s\n", __func__);
- 	tegra_gpcdma_memcpy_priv(dst_addr, 0, num_bytes,
- 				 DMA_CH_CSR_DMA_MODE_FIXEDPATTERN);
- }
-diff --git a/plat/nvidia/tegra/drivers/memctrl/memctrl_v1.c b/plat/nvidia/tegra/drivers/memctrl/memctrl_v1.c
-index b3dcd2a..8916f73 100644
---- a/plat/nvidia/tegra/drivers/memctrl/memctrl_v1.c
-+++ b/plat/nvidia/tegra/drivers/memctrl/memctrl_v1.c
-@@ -27,6 +27,7 @@ static uint64_t video_mem_size;
-  */
- void tegra_memctrl_setup(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	/*
- 	 * Setup the Memory controller to allow only secure accesses to
- 	 * the TZDRAM carveout
-@@ -72,6 +73,7 @@ void tegra_memctrl_setup(void)
-  */
- void tegra_memctrl_restore_settings(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	tegra_memctrl_setup();
- }
- 
-@@ -83,6 +85,7 @@ void tegra_memctrl_restore_settings(void)
-  */
- void tegra_memctrl_tzdram_setup(uint64_t phys_base, uint32_t size_in_bytes)
- {
-+	INFO("Entering %s\n", __func__);
- 	/*
- 	 * Setup the Memory controller to allow only secure accesses to
- 	 * the TZDRAM carveout
-@@ -96,6 +99,7 @@ void tegra_memctrl_tzdram_setup(uint64_t phys_base, uint32_t size_in_bytes)
- static void tegra_clear_videomem(uintptr_t non_overlap_area_start,
- 				 unsigned long long non_overlap_area_size)
- {
-+	INFO("Entering %s\n", __func__);
- 	int ret;
- 
- 	/*
-@@ -123,6 +127,7 @@ static void tegra_clear_videomem(uintptr_t non_overlap_area_start,
-  */
- void tegra_memctrl_videomem_setup(uint64_t phys_base, uint32_t size_in_bytes)
- {
-+	INFO("Entering %s\n", __func__);
- 	uintptr_t vmem_end_old = video_mem_base + (video_mem_size << 20);
- 	uintptr_t vmem_end_new = phys_base + size_in_bytes;
- 	unsigned long long non_overlap_area_size;
-@@ -189,6 +194,7 @@ done:
-  */
- void tegra_memctrl_disable_ahb_redirection(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	/* program the aperture registers */
- 	tegra_mc_write_32(MC_IRAM_BASE_LO, 0xFFFFFFFF);
- 	tegra_mc_write_32(MC_IRAM_TOP_LO, 0);
-@@ -200,6 +206,7 @@ void tegra_memctrl_disable_ahb_redirection(void)
- 
- void tegra_memctrl_clear_pending_interrupts(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint32_t mcerr;
- 
- 	/* check if there are any pending interrupts */
-diff --git a/plat/nvidia/tegra/drivers/memctrl/memctrl_v2.c b/plat/nvidia/tegra/drivers/memctrl/memctrl_v2.c
-index 8cba45c..9655743 100644
---- a/plat/nvidia/tegra/drivers/memctrl/memctrl_v2.c
-+++ b/plat/nvidia/tegra/drivers/memctrl/memctrl_v2.c
-@@ -31,6 +31,7 @@ static uint64_t video_mem_size_mb;
-  */
- void tegra_memctrl_setup(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	INFO("Tegra Memory Controller (v2)\n");
- 
- 	/* allow platforms to program custom memory controller settings */
-@@ -42,6 +43,7 @@ void tegra_memctrl_setup(void)
-  */
- void tegra_memctrl_restore_settings(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	/* restore platform's memory controller settings */
- 	plat_memctrl_restore();
- 
-@@ -78,6 +80,7 @@ void tegra_memctrl_restore_settings(void)
-  */
- void tegra_memctrl_tzdram_setup(uint64_t phys_base, uint32_t size_in_bytes)
- {
-+	INFO("Entering %s\n", __func__);
- 	/*
- 	 * Perform platform specific steps.
- 	 */
-@@ -92,6 +95,7 @@ void tegra_memctrl_tzdram_setup(uint64_t phys_base, uint32_t size_in_bytes)
-  */
- void tegra_memctrl_tzram_setup(uint64_t phys_base, uint32_t size_in_bytes)
- {
-+	INFO("Entering %s\n", __func__);
- 	; /* do nothing */
- }
- 
-@@ -100,6 +104,7 @@ void tegra_memctrl_tzram_setup(uint64_t phys_base, uint32_t size_in_bytes)
-  */
- void tegra_mc_save_context(uint64_t mc_ctx_addr)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint32_t i, num_entries = 0;
- 	mc_regs_t *mc_ctx_regs;
- 	const bl31_plat_params_t *params_from_bl2 = bl31_get_plat_params();
-@@ -153,6 +158,7 @@ void tegra_mc_save_context(uint64_t mc_ctx_addr)
- static void tegra_lock_videomem_nonoverlap(uint64_t phys_base,
- 					   uint64_t size_in_bytes)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint32_t index;
- 	uint64_t total_128kb_blocks = size_in_bytes >> 17;
- 	uint64_t residual_4kb_blocks = (size_in_bytes & (uint32_t)0x1FFFF) >> 12;
-@@ -203,6 +209,7 @@ static void tegra_lock_videomem_nonoverlap(uint64_t phys_base,
- 
- static void tegra_unlock_videomem_nonoverlap(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	/* Clear the base */
- 	tegra_mc_write_32(MC_VIDEO_PROTECT_CLEAR_BASE_LO, 0);
- 	tegra_mc_write_32(MC_VIDEO_PROTECT_CLEAR_BASE_HI, 0);
-@@ -214,6 +221,7 @@ static void tegra_unlock_videomem_nonoverlap(void)
- static void tegra_clear_videomem(uintptr_t non_overlap_area_start,
- 				 unsigned long long non_overlap_area_size)
- {
-+	INFO("Entering %s\n", __func__);
- 	int ret;
- 
- 	INFO("Cleaning previous Video Memory Carveout\n");
-@@ -238,6 +246,7 @@ static void tegra_clear_videomem(uintptr_t non_overlap_area_start,
- static void tegra_clear_videomem_nonoverlap(uintptr_t phys_base,
- 		unsigned long size_in_bytes)
- {
-+	INFO("Entering %s\n", __func__);
- 	uintptr_t vmem_end_old = video_mem_base + (video_mem_size_mb << 20);
- 	uintptr_t vmem_end_new = phys_base + size_in_bytes;
- 	unsigned long long non_overlap_area_size;
-@@ -273,6 +282,7 @@ static void tegra_clear_videomem_nonoverlap(uintptr_t phys_base,
-  */
- void tegra_memctrl_videomem_setup(uint64_t phys_base, uint32_t size_in_bytes)
- {
-+	INFO("Entering %s\n", __func__);
- 	/*
- 	 * Setup the Memory controller to restrict CPU accesses to the Video
- 	 * Memory region
-@@ -328,10 +338,12 @@ void tegra_memctrl_videomem_setup(uint64_t phys_base, uint32_t size_in_bytes)
-  */
- void tegra_memctrl_disable_ahb_redirection(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	; /* do nothing */
- }
- 
- void tegra_memctrl_clear_pending_interrupts(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	; /* do nothing */
- }
-diff --git a/plat/nvidia/tegra/drivers/pmc/pmc.c b/plat/nvidia/tegra/drivers/pmc/pmc.c
-index 6c5a73b..8fe0b43 100644
---- a/plat/nvidia/tegra/drivers/pmc/pmc.c
-+++ b/plat/nvidia/tegra/drivers/pmc/pmc.c
-@@ -29,6 +29,7 @@ static const uint32_t pmc_cpu_powergate_id[4] = {
-  ******************************************************************************/
- void tegra_pmc_cpu_on(int32_t cpu)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint32_t val;
- 
- 	/*
-@@ -70,6 +71,7 @@ void tegra_pmc_cpu_on(int32_t cpu)
-  ******************************************************************************/
- void tegra_pmc_cpu_setup(uint64_t reset_addr)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint32_t val;
- 
- 	tegra_pmc_write_32(PMC_SECURE_SCRATCH34,
-@@ -83,6 +85,7 @@ void tegra_pmc_cpu_setup(uint64_t reset_addr)
-  ******************************************************************************/
- void tegra_pmc_lock_cpu_vectors(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint32_t val;
- 
- 	/* lock PMC_SECURE_SCRATCH22 */
-@@ -102,6 +105,7 @@ void tegra_pmc_lock_cpu_vectors(void)
-  ******************************************************************************/
- bool tegra_pmc_is_last_on_cpu(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	int i, cpu = read_mpidr() & MPIDR_CPU_MASK;
- 	uint32_t val = tegra_pmc_read_32(PMC_PWRGATE_STATUS);;
- 	bool status = true;
-@@ -128,6 +132,7 @@ bool tegra_pmc_is_last_on_cpu(void)
-  ******************************************************************************/
- void tegra_pmc_resume(void)
- {
-+	INFO("Entering %s\n", __func__);
- 
- 	/* Clear DPD sample */
- 	mmio_write_32((TEGRA_PMC_BASE + PMC_IO_DPD_SAMPLE), 0x0);
-@@ -141,6 +146,7 @@ void tegra_pmc_resume(void)
-  ******************************************************************************/
- __dead2 void tegra_pmc_system_reset(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint32_t reg;
- 
- 	reg = tegra_pmc_read_32(PMC_CONFIG);
-diff --git a/plat/nvidia/tegra/drivers/psc/psc_mailbox.c b/plat/nvidia/tegra/drivers/psc/psc_mailbox.c
-index 53f47e0..bc969f1 100644
---- a/plat/nvidia/tegra/drivers/psc/psc_mailbox.c
-+++ b/plat/nvidia/tegra/drivers/psc/psc_mailbox.c
-@@ -18,6 +18,7 @@
-  */
- void tegra_psc_notify_sc7_entry(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	INFO("%s: send SC7 opcode to PSC\n", __func__);
- 	mmio_write_32((TEGRA_PSC_MBOX_TZ_BASE + PSC_MBOX_TZ_IN),
- 		 PSC_MBOX_TZ_OPCODE_ENTER_SC7);
-@@ -33,6 +34,7 @@ void tegra_psc_notify_sc7_entry(void)
-  */
- void tegra_psc_wait_for_ack(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint32_t timeout_count = PSC_MBOX_ACK_TIMEOUT_MAX_USEC;
- 	uint32_t val, out_valid;
- 
-diff --git a/plat/nvidia/tegra/drivers/smmu/smmu.c b/plat/nvidia/tegra/drivers/smmu/smmu.c
-index 4189b00..deff59f 100644
---- a/plat/nvidia/tegra/drivers/smmu/smmu.c
-+++ b/plat/nvidia/tegra/drivers/smmu/smmu.c
-@@ -29,6 +29,7 @@ extern void memcpy16(void *dest, const void *src, unsigned int length);
-  */
- void tegra_smmu_init(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint32_t val, cb_idx, smmu_id, ctx_base;
- 	uint32_t num_smmu_devices = plat_get_num_smmu_devices();
- 
-@@ -72,6 +73,7 @@ void tegra_smmu_init(void)
-  */
- void tegra_smmu_verify(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint32_t cb_idx, ctx_base, smmu_id, val;
- 	uint32_t num_smmu_devices = plat_get_num_smmu_devices();
- 	uint32_t mismatch = 0U;
 diff --git a/plat/nvidia/tegra/include/t234/tegra234_ras_private.h b/plat/nvidia/tegra/include/t234/tegra234_ras_private.h
 index 4e6fd13..0896909 100644
 --- a/plat/nvidia/tegra/include/t234/tegra234_ras_private.h
@@ -1782,7 +267,7 @@ index 4e6fd13..0896909 100644
 +
  #endif /* TEGRA234_RAS_PRIVATE */
 diff --git a/plat/nvidia/tegra/lib/debug/profiler.c b/plat/nvidia/tegra/lib/debug/profiler.c
-index dd76a4e..b61cacc 100644
+index dd76a4e..e2231a5 100644
 --- a/plat/nvidia/tegra/lib/debug/profiler.c
 +++ b/plat/nvidia/tegra/lib/debug/profiler.c
 @@ -20,6 +20,7 @@
@@ -1793,151 +278,11 @@ index dd76a4e..b61cacc 100644
  #include <arch.h>
  #include <arch_helpers.h>
  #include <assert.h>
-@@ -54,6 +55,7 @@ static bool is_shmem_buf_mapped;
-  ******************************************************************************/
- void boot_profiler_init(uint64_t shmem_base, uint32_t tmr_base)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint64_t shmem_end_base;
- 
- 	assert(shmem_base != ULL(0));
-@@ -80,6 +82,7 @@ void boot_profiler_init(uint64_t shmem_base, uint32_t tmr_base)
-  ******************************************************************************/
- void boot_profiler_add_record(const char *str)
- {
-+	INFO("Entering %s\n", __func__);
- 	unsigned int len;
- 
- 	/* calculate the length of the tag */
-@@ -125,6 +128,7 @@ void boot_profiler_add_record(const char *str)
-  ******************************************************************************/
- void boot_profiler_deinit(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	if (shmem_base_addr != ULL(0)) {
- 
- 		/* clean up resources */
 diff --git a/plat/nvidia/tegra/soc/t186/drivers/mce/ari.c b/plat/nvidia/tegra/soc/t186/drivers/mce/ari.c
-index a57bc11..4bf56bc 100644
+index a57bc11..710f406 100644
 --- a/plat/nvidia/tegra/soc/t186/drivers/mce/ari.c
 +++ b/plat/nvidia/tegra/soc/t186/drivers/mce/ari.c
-@@ -43,36 +43,43 @@
-  ******************************************************************************/
- static inline uint32_t ari_read_32(uint32_t ari_base, uint32_t reg)
- {
-+	INFO("Entering %s\n", __func__);
- 	return mmio_read_32((uint64_t)ari_base + (uint64_t)reg);
- }
- 
- static inline void ari_write_32(uint32_t ari_base, uint32_t val, uint32_t reg)
- {
-+	INFO("Entering %s\n", __func__);
- 	mmio_write_32((uint64_t)ari_base + (uint64_t)reg, val);
- }
- 
- static inline uint32_t ari_get_request_low(uint32_t ari_base)
- {
-+	INFO("Entering %s\n", __func__);
- 	return ari_read_32(ari_base, ARI_REQUEST_DATA_LO);
- }
- 
- static inline uint32_t ari_get_request_high(uint32_t ari_base)
- {
-+	INFO("Entering %s\n", __func__);
- 	return ari_read_32(ari_base, ARI_REQUEST_DATA_HI);
- }
- 
- static inline uint32_t ari_get_response_low(uint32_t ari_base)
- {
-+	INFO("Entering %s\n", __func__);
- 	return ari_read_32(ari_base, ARI_RESPONSE_DATA_LO);
- }
- 
- static inline uint32_t ari_get_response_high(uint32_t ari_base)
- {
-+	INFO("Entering %s\n", __func__);
- 	return ari_read_32(ari_base, ARI_RESPONSE_DATA_HI);
- }
- 
- static inline void ari_clobber_response(uint32_t ari_base)
- {
-+	INFO("Entering %s\n", __func__);
- 	ari_write_32(ari_base, 0, ARI_RESPONSE_DATA_LO);
- 	ari_write_32(ari_base, 0, ARI_RESPONSE_DATA_HI);
- }
-@@ -80,6 +87,7 @@ static inline void ari_clobber_response(uint32_t ari_base)
- static int32_t ari_request_wait(uint32_t ari_base, uint32_t evt_mask, uint32_t req,
- 		uint32_t lo, uint32_t hi)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint32_t retries = (uint32_t)ARI_MAX_RETRY_COUNT;
- 	uint32_t status;
- 	int32_t ret = 0;
-@@ -136,6 +144,7 @@ static int32_t ari_request_wait(uint32_t ari_base, uint32_t evt_mask, uint32_t r
- 
- int32_t ari_enter_cstate(uint32_t ari_base, uint32_t state, uint32_t wake_time)
- {
-+	INFO("Entering %s\n", __func__);
- 	int32_t ret = 0;
- 
- 	/* check for allowed power state */
-@@ -161,6 +170,7 @@ int32_t ari_update_cstate_info(uint32_t ari_base, uint32_t cluster, uint32_t ccp
- 	uint32_t system, uint8_t sys_state_force, uint32_t wake_mask,
- 	uint8_t update_wake_mask)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint64_t val = 0U;
- 
- 	/* clean the previous response state */
-@@ -197,6 +207,7 @@ int32_t ari_update_cstate_info(uint32_t ari_base, uint32_t cluster, uint32_t ccp
- 
- int32_t ari_update_crossover_time(uint32_t ari_base, uint32_t type, uint32_t time)
- {
-+	INFO("Entering %s\n", __func__);
- 	int32_t ret = 0;
- 
- 	/* sanity check crossover type */
-@@ -217,6 +228,7 @@ int32_t ari_update_crossover_time(uint32_t ari_base, uint32_t type, uint32_t tim
- 
- uint64_t ari_read_cstate_stats(uint32_t ari_base, uint32_t state)
- {
-+	INFO("Entering %s\n", __func__);
- 	int32_t ret;
- 	uint64_t result;
- 
-@@ -240,6 +252,7 @@ uint64_t ari_read_cstate_stats(uint32_t ari_base, uint32_t state)
- 
- int32_t ari_write_cstate_stats(uint32_t ari_base, uint32_t state, uint32_t stats)
- {
-+	INFO("Entering %s\n", __func__);
- 	/* clean the previous response state */
- 	ari_clobber_response(ari_base);
- 
-@@ -250,6 +263,7 @@ int32_t ari_write_cstate_stats(uint32_t ari_base, uint32_t state, uint32_t stats
- 
- uint64_t ari_enumeration_misc(uint32_t ari_base, uint32_t cmd, uint32_t data)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint64_t resp;
- 	int32_t ret;
- 	uint32_t local_data = data;
-@@ -276,6 +290,7 @@ uint64_t ari_enumeration_misc(uint32_t ari_base, uint32_t cmd, uint32_t data)
- 
- int32_t ari_is_ccx_allowed(uint32_t ari_base, uint32_t state, uint32_t wake_time)
- {
-+	INFO("Entering %s\n", __func__);
- 	int32_t ret;
- 	uint32_t result;
- 
-@@ -297,6 +312,7 @@ int32_t ari_is_ccx_allowed(uint32_t ari_base, uint32_t state, uint32_t wake_time
- 
- int32_t ari_is_sc7_allowed(uint32_t ari_base, uint32_t state, uint32_t wake_time)
- {
-+	INFO("Entering %s\n", __func__);
- 	int32_t ret, result;
- 
- 	/* check for allowed power state */
-@@ -324,6 +340,7 @@ int32_t ari_is_sc7_allowed(uint32_t ari_base, uint32_t state, uint32_t wake_time
+@@ -324,6 +324,7 @@ int32_t ari_is_sc7_allowed(uint32_t ari_base, uint32_t state, uint32_t wake_time
  
  int32_t ari_online_core(uint32_t ari_base, uint32_t core)
  {
@@ -1945,248 +290,8 @@ index a57bc11..4bf56bc 100644
  	uint64_t cpu = read_mpidr() & (MPIDR_CPU_MASK);
  	uint64_t cluster = (read_mpidr() & (MPIDR_CLUSTER_MASK)) >>
  			   (MPIDR_AFFINITY_BITS);
-@@ -357,6 +374,7 @@ int32_t ari_online_core(uint32_t ari_base, uint32_t core)
- 
- int32_t ari_cc3_ctrl(uint32_t ari_base, uint32_t freq, uint32_t volt, uint8_t enable)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint32_t val;
- 
- 	/* clean the previous response state */
-@@ -382,6 +400,7 @@ int32_t ari_cc3_ctrl(uint32_t ari_base, uint32_t freq, uint32_t volt, uint8_t en
- 
- int32_t ari_reset_vector_update(uint32_t ari_base)
- {
-+	INFO("Entering %s\n", __func__);
- 	/* clean the previous response state */
- 	ari_clobber_response(ari_base);
- 
-@@ -397,6 +416,7 @@ int32_t ari_reset_vector_update(uint32_t ari_base)
- 
- int32_t ari_roc_flush_cache_trbits(uint32_t ari_base)
- {
-+	INFO("Entering %s\n", __func__);
- 	/* clean the previous response state */
- 	ari_clobber_response(ari_base);
- 
-@@ -406,6 +426,7 @@ int32_t ari_roc_flush_cache_trbits(uint32_t ari_base)
- 
- int32_t ari_roc_flush_cache(uint32_t ari_base)
- {
-+	INFO("Entering %s\n", __func__);
- 	/* clean the previous response state */
- 	ari_clobber_response(ari_base);
- 
-@@ -415,6 +436,7 @@ int32_t ari_roc_flush_cache(uint32_t ari_base)
- 
- int32_t ari_roc_clean_cache(uint32_t ari_base)
- {
-+	INFO("Entering %s\n", __func__);
- 	/* clean the previous response state */
- 	ari_clobber_response(ari_base);
- 
-@@ -424,6 +446,7 @@ int32_t ari_roc_clean_cache(uint32_t ari_base)
- 
- uint64_t ari_read_write_mca(uint32_t ari_base, uint64_t cmd, uint64_t *data)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint64_t mca_arg_data, result = 0;
- 	uint32_t resp_lo, resp_hi;
- 	uint32_t mca_arg_err, mca_arg_finish;
-@@ -464,6 +487,7 @@ uint64_t ari_read_write_mca(uint32_t ari_base, uint64_t cmd, uint64_t *data)
- 
- int32_t ari_update_ccplex_gsc(uint32_t ari_base, uint32_t gsc_idx)
- {
-+	INFO("Entering %s\n", __func__);
- 	int32_t ret = 0;
- 	/* sanity check GSC ID */
- 	if (gsc_idx > TEGRA_ARI_GSC_VPR_IDX) {
-@@ -486,6 +510,7 @@ int32_t ari_update_ccplex_gsc(uint32_t ari_base, uint32_t gsc_idx)
- 
- void ari_enter_ccplex_state(uint32_t ari_base, uint32_t state_idx)
- {
-+	INFO("Entering %s\n", __func__);
- 	/* clean the previous response state */
- 	ari_clobber_response(ari_base);
- 
-@@ -499,6 +524,7 @@ void ari_enter_ccplex_state(uint32_t ari_base, uint32_t state_idx)
- int32_t ari_read_write_uncore_perfmon(uint32_t ari_base, uint64_t req,
- 		uint64_t *data)
- {
-+	INFO("Entering %s\n", __func__);
- 	int32_t ret, result;
- 	uint32_t val, req_status;
- 	uint8_t req_cmd;
-@@ -546,6 +572,7 @@ int32_t ari_read_write_uncore_perfmon(uint32_t ari_base, uint64_t req,
- 
- void ari_misc_ccplex(uint32_t ari_base, uint32_t index, uint32_t value)
- {
-+	INFO("Entering %s\n", __func__);
- 	/*
- 	 * This invokes the ARI_MISC_CCPLEX commands. This can be
- 	 * used to enable/disable coresight clock gating.
-diff --git a/plat/nvidia/tegra/soc/t186/drivers/mce/mce.c b/plat/nvidia/tegra/soc/t186/drivers/mce/mce.c
-index aebaceb..b91ae94 100644
---- a/plat/nvidia/tegra/soc/t186/drivers/mce/mce.c
-+++ b/plat/nvidia/tegra/soc/t186/drivers/mce/mce.c
-@@ -113,6 +113,7 @@ static mce_config_t mce_cfg_table[MCE_ARI_APERTURES_MAX] = {
- 
- static uint32_t mce_get_curr_cpu_ari_base(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint64_t mpidr = read_mpidr();
- 	uint64_t cpuid = mpidr & MPIDR_CPU_MASK;
- 	uint64_t impl = (read_midr() >> MIDR_IMPL_SHIFT) & MIDR_IMPL_MASK;
-@@ -133,6 +134,7 @@ static uint32_t mce_get_curr_cpu_ari_base(void)
- 
- static arch_mce_ops_t *mce_get_curr_cpu_ops(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint64_t mpidr = read_mpidr();
- 	uint64_t cpuid = mpidr & MPIDR_CPU_MASK;
- 	uint64_t impl = (read_midr() >> MIDR_IMPL_SHIFT) &
-@@ -158,6 +160,7 @@ static arch_mce_ops_t *mce_get_curr_cpu_ops(void)
- int32_t mce_command_handler(uint64_t cmd, uint64_t arg0, uint64_t arg1,
- 			uint64_t arg2)
- {
-+	INFO("Entering %s\n", __func__);
- 	const arch_mce_ops_t *ops;
- 	gp_regs_t *gp_regs = get_gpregs_ctx(cm_get_context(NON_SECURE));
- 	uint32_t cpu_ari_base;
-@@ -356,6 +359,7 @@ int32_t mce_command_handler(uint64_t cmd, uint64_t arg0, uint64_t arg1,
-  ******************************************************************************/
- int32_t mce_update_reset_vector(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	const arch_mce_ops_t *ops = mce_get_curr_cpu_ops();
- 
- 	ops->update_reset_vector(mce_get_curr_cpu_ari_base());
-@@ -365,6 +369,7 @@ int32_t mce_update_reset_vector(void)
- 
- static int32_t mce_update_ccplex_gsc(tegra_ari_gsc_index_t gsc_idx)
- {
-+	INFO("Entering %s\n", __func__);
- 	const arch_mce_ops_t *ops = mce_get_curr_cpu_ops();
- 
- 	ops->update_ccplex_gsc(mce_get_curr_cpu_ari_base(), gsc_idx);
-@@ -377,6 +382,7 @@ static int32_t mce_update_ccplex_gsc(tegra_ari_gsc_index_t gsc_idx)
-  ******************************************************************************/
- int32_t mce_update_gsc_videomem(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	return mce_update_ccplex_gsc(TEGRA_ARI_GSC_VPR_IDX);
- }
- 
-@@ -385,6 +391,7 @@ int32_t mce_update_gsc_videomem(void)
-  ******************************************************************************/
- int32_t mce_update_gsc_tzdram(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	return mce_update_ccplex_gsc(TEGRA_ARI_GSC_TZ_DRAM_IDX);
- }
- 
-@@ -393,6 +400,7 @@ int32_t mce_update_gsc_tzdram(void)
-  ******************************************************************************/
- __dead2 void mce_enter_ccplex_state(uint32_t state_idx)
- {
-+	INFO("Entering %s\n", __func__);
- 	const arch_mce_ops_t *ops = mce_get_curr_cpu_ops();
- 
- 	/* sanity check state value */
-@@ -415,6 +423,7 @@ __dead2 void mce_enter_ccplex_state(uint32_t state_idx)
-  ******************************************************************************/
- void mce_update_cstate_info(const mce_cstate_info_t *cstate)
- {
-+	INFO("Entering %s\n", __func__);
- 	const arch_mce_ops_t *ops = mce_get_curr_cpu_ops();
- 
- 	/* issue the UPDATE_CSTATE_INFO request */
-@@ -429,6 +438,7 @@ void mce_update_cstate_info(const mce_cstate_info_t *cstate)
-  ******************************************************************************/
- void mce_verify_firmware_version(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	const arch_mce_ops_t *ops;
- 	uint32_t cpu_ari_base;
- 	uint64_t version;
-diff --git a/plat/nvidia/tegra/soc/t186/drivers/mce/nvg.c b/plat/nvidia/tegra/soc/t186/drivers/mce/nvg.c
-index cbc9aa3..e880b9a 100644
---- a/plat/nvidia/tegra/soc/t186/drivers/mce/nvg.c
-+++ b/plat/nvidia/tegra/soc/t186/drivers/mce/nvg.c
-@@ -18,6 +18,7 @@
- 
- int32_t nvg_enter_cstate(uint32_t ari_base, uint32_t state, uint32_t wake_time)
- {
-+	INFO("Entering %s\n", __func__);
- 	int32_t ret = 0;
- 	uint64_t val = 0ULL;
- 
-@@ -48,6 +49,7 @@ int32_t nvg_update_cstate_info(uint32_t ari_base, uint32_t cluster, uint32_t ccp
- 		uint32_t system, uint8_t sys_state_force, uint32_t wake_mask,
- 		uint8_t update_wake_mask)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint64_t val = 0ULL;
- 
- 	(void)ari_base;
-@@ -88,6 +90,7 @@ int32_t nvg_update_cstate_info(uint32_t ari_base, uint32_t cluster, uint32_t ccp
- 
- int32_t nvg_update_crossover_time(uint32_t ari_base, uint32_t type, uint32_t time)
- {
-+	INFO("Entering %s\n", __func__);
- 	int32_t ret = 0;
- 
- 	(void)ari_base;
-@@ -112,6 +115,7 @@ int32_t nvg_update_crossover_time(uint32_t ari_base, uint32_t type, uint32_t tim
- 
- uint64_t nvg_read_cstate_stats(uint32_t ari_base, uint32_t state)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint64_t ret;
- 
- 	(void)ari_base;
-@@ -136,6 +140,7 @@ uint64_t nvg_read_cstate_stats(uint32_t ari_base, uint32_t state)
- 
- int32_t nvg_write_cstate_stats(uint32_t ari_base, uint32_t state, uint32_t stats)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint64_t val;
- 
- 	(void)ari_base;
-@@ -162,6 +167,7 @@ int32_t nvg_write_cstate_stats(uint32_t ari_base, uint32_t state, uint32_t stats
- 
- int32_t nvg_is_ccx_allowed(uint32_t ari_base, uint32_t state, uint32_t wake_time)
- {
-+	INFO("Entering %s\n", __func__);
- 	(void)ari_base;
- 	(void)state;
- 	(void)wake_time;
-@@ -172,6 +178,7 @@ int32_t nvg_is_ccx_allowed(uint32_t ari_base, uint32_t state, uint32_t wake_time
- 
- int32_t nvg_is_sc7_allowed(uint32_t ari_base, uint32_t state, uint32_t wake_time)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint64_t val;
- 	int32_t ret;
- 
-@@ -203,6 +210,7 @@ int32_t nvg_is_sc7_allowed(uint32_t ari_base, uint32_t state, uint32_t wake_time
- 
- int32_t nvg_online_core(uint32_t ari_base, uint32_t core)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint64_t cpu = read_mpidr() & MPIDR_CPU_MASK;
- 	uint64_t impl = (read_midr() >> MIDR_IMPL_SHIFT) & MIDR_IMPL_MASK;
- 	int32_t ret = 0;
-@@ -232,6 +240,7 @@ int32_t nvg_online_core(uint32_t ari_base, uint32_t core)
- 
- int32_t nvg_cc3_ctrl(uint32_t ari_base, uint32_t freq, uint32_t volt, uint8_t enable)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint32_t val;
- 
- 	(void)ari_base;
 diff --git a/plat/nvidia/tegra/soc/t186/drivers/se/se.c b/plat/nvidia/tegra/soc/t186/drivers/se/se.c
-index dad94fd..b5bec5e 100644
+index dad94fd..41a6287 100644
 --- a/plat/nvidia/tegra/soc/t186/drivers/se/se.c
 +++ b/plat/nvidia/tegra/soc/t186/drivers/se/se.c
 @@ -4,6 +4,7 @@
@@ -2197,40 +302,8 @@ index dad94fd..b5bec5e 100644
  #include <assert.h>
  #include <drivers/delay_timer.h>
  #include <errno.h>
-@@ -37,6 +38,7 @@
-  */
- static int32_t tegra_se_operation_complete(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint32_t val = 0U;
- 
- 	/* Read SE0 interrupt register to ensure H/W operation complete */
-@@ -72,6 +74,7 @@ static int32_t tegra_se_operation_complete(void)
- static int32_t tegra_se_start_normal_operation(uint64_t src_addr,
- 		uint32_t nbytes, uint32_t last_buf, uint32_t src_len_inbytes)
- {
-+	INFO("Entering %s\n", __func__);
- 	int32_t ret = 0;
- 	uint32_t val = 0U;
- 	uint32_t src_in_lo;
-@@ -125,6 +128,7 @@ static int32_t tegra_se_start_normal_operation(uint64_t src_addr,
- static int32_t tegra_se_calculate_sha256_hash(uint64_t src_addr,
- 						uint32_t src_len_inbyte)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint32_t val, last_buf, i;
- 	int32_t ret = 0;
- 	uint32_t operations;
-@@ -240,6 +244,7 @@ static int32_t tegra_se_calculate_sha256_hash(uint64_t src_addr,
-  */
- int32_t tegra_se_save_sha256_hash(uint64_t bl31_base, uint32_t src_len_inbyte)
- {
-+	INFO("Entering %s\n", __func__);
- 	int32_t ret = 0;
- 	uint32_t val = 0U, hash_offset = 0U, scratch_offset = 0U, security;
- 
 diff --git a/plat/nvidia/tegra/soc/t186/plat_memctrl.c b/plat/nvidia/tegra/soc/t186/plat_memctrl.c
-index a104f33..fc5939e 100644
+index a104f33..9ccf919 100644
 --- a/plat/nvidia/tegra/soc/t186/plat_memctrl.c
 +++ b/plat/nvidia/tegra/soc/t186/plat_memctrl.c
 @@ -5,6 +5,7 @@
@@ -2241,309 +314,8 @@ index a104f33..fc5939e 100644
  #include <assert.h>
  #include <common/bl_common.h>
  
-@@ -148,6 +149,7 @@ const static mc_txn_override_cfg_t tegra186_txn_override_cfgs[] = {
- 
- static void tegra186_memctrl_reconfig_mss_clients(void)
- {
-+	INFO("Entering %s\n", __func__);
- #if ENABLE_ROC_FOR_ORDERING_CLIENT_REQUESTS
- 	uint32_t val, wdata_0, wdata_1;
- 
-@@ -402,6 +404,7 @@ static void tegra186_memctrl_reconfig_mss_clients(void)
- 
- static void tegra186_memctrl_set_overrides(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint32_t i, val;
- 
- 	/*
-@@ -602,6 +605,7 @@ static __attribute__((aligned(16))) mc_regs_t tegra186_mc_context[] = {
-  ******************************************************************************/
- mc_regs_t *plat_memctrl_get_sys_suspend_ctx(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	/* index of _END_OF_TABLE_ */
- 	tegra186_mc_context[0].val = (uint32_t)(ARRAY_SIZE(tegra186_mc_context)) - 1U;
- 
-@@ -610,6 +614,7 @@ mc_regs_t *plat_memctrl_get_sys_suspend_ctx(void)
- 
- void plat_memctrl_setup(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint32_t val;
- 	unsigned int i;
- 
-@@ -660,6 +665,7 @@ void plat_memctrl_setup(void)
-  ******************************************************************************/
- void plat_memctrl_restore(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	/*
- 	 * Re-configure MSS to allow ROC to deal with ordering of the
- 	 * Memory Controller traffic. This is needed as the Memory Controller
-@@ -678,6 +684,7 @@ void plat_memctrl_restore(void)
-  ******************************************************************************/
- void plat_memctrl_tzdram_setup(uint64_t phys_base, uint64_t size_in_bytes)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint32_t val;
- 
- 	/*
-diff --git a/plat/nvidia/tegra/soc/t186/plat_psci_handlers.c b/plat/nvidia/tegra/soc/t186/plat_psci_handlers.c
-index 6a8f4c2..d670a4c 100644
---- a/plat/nvidia/tegra/soc/t186/plat_psci_handlers.c
-+++ b/plat/nvidia/tegra/soc/t186/plat_psci_handlers.c
-@@ -49,6 +49,7 @@ static struct tegra_psci_percpu_data {
- int32_t tegra_soc_validate_power_state(uint32_t power_state,
- 					psci_power_state_t *req_state)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint8_t state_id = (uint8_t)psci_get_pstate_id(power_state) & TEGRA186_STATE_ID_MASK;
- 	uint32_t cpu = plat_my_core_pos();
- 	int32_t ret = PSCI_E_SUCCESS;
-@@ -94,12 +95,14 @@ int32_t tegra_soc_validate_power_state(uint32_t power_state,
- 
- int32_t tegra_soc_cpu_standby(plat_local_state_t cpu_state)
- {
-+	INFO("Entering %s\n", __func__);
- 	(void)cpu_state;
- 	return PSCI_E_SUCCESS;
- }
- 
- int32_t tegra_soc_pwr_domain_suspend(const psci_power_state_t *target_state)
- {
-+	INFO("Entering %s\n", __func__);
- 	const plat_local_state_t *pwr_domain_state;
- 	uint8_t stateid_afflvl0, stateid_afflvl2;
- 	uint32_t cpu = plat_my_core_pos();
-@@ -175,6 +178,7 @@ int32_t tegra_soc_pwr_domain_suspend(const psci_power_state_t *target_state)
- static bool tegra_last_cpu_in_cluster(const plat_local_state_t *states,
- 			uint32_t ncpu)
- {
-+	INFO("Entering %s\n", __func__);
- 	plat_local_state_t target;
- 	bool last_on_cpu = true;
- 	uint32_t num_cpus = ncpu, pos = 0;
-@@ -197,6 +201,7 @@ static bool tegra_last_cpu_in_cluster(const plat_local_state_t *states,
- static plat_local_state_t tegra_get_afflvl1_pwr_state(const plat_local_state_t *states,
- 			uint32_t ncpu)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint32_t core_pos = (uint32_t)read_mpidr() & (uint32_t)MPIDR_CPU_MASK;
- 	uint32_t cpu = plat_my_core_pos();
- 	int32_t ret;
-@@ -258,6 +263,7 @@ plat_local_state_t tegra_soc_get_target_pwr_state(uint32_t lvl,
- 					     const plat_local_state_t *states,
- 					     uint32_t ncpu)
- {
-+	INFO("Entering %s\n", __func__);
- 	plat_local_state_t target = PSCI_LOCAL_STATE_RUN;
- 	uint32_t cpu = plat_my_core_pos();
- 
-@@ -278,6 +284,7 @@ plat_local_state_t tegra_soc_get_target_pwr_state(uint32_t lvl,
- 
- int32_t tegra_soc_pwr_domain_power_down_wfi(const psci_power_state_t *target_state)
- {
-+	INFO("Entering %s\n", __func__);
- 	const plat_local_state_t *pwr_domain_state =
- 		target_state->pwr_domain_state;
- 	const bl31_plat_params_t *params_from_bl2 = bl31_get_plat_params();
-@@ -342,11 +349,13 @@ int32_t tegra_soc_pwr_domain_power_down_wfi(const psci_power_state_t *target_sta
- 
- int32_t tegra_soc_pwr_domain_suspend_pwrdown_early(const psci_power_state_t *target_state)
- {
-+	INFO("Entering %s\n", __func__);
- 	return PSCI_E_NOT_SUPPORTED;
- }
- 
- int32_t tegra_soc_pwr_domain_on(u_register_t mpidr)
- {
-+	INFO("Entering %s\n", __func__);
- 	int32_t ret = PSCI_E_SUCCESS;
- 	uint64_t target_cpu = mpidr & MPIDR_CPU_MASK;
- 	uint64_t target_cluster = (mpidr & MPIDR_CLUSTER_MASK) >>
-@@ -369,6 +378,7 @@ int32_t tegra_soc_pwr_domain_on(u_register_t mpidr)
- 
- int32_t tegra_soc_pwr_domain_on_finish(const psci_power_state_t *target_state)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint8_t stateid_afflvl2 = target_state->pwr_domain_state[PLAT_MAX_PWR_LVL];
- 	uint8_t stateid_afflvl0 = target_state->pwr_domain_state[MPIDR_AFFLVL0];
- 	mce_cstate_info_t cstate_info = { 0 };
-@@ -435,6 +445,7 @@ int32_t tegra_soc_pwr_domain_on_finish(const psci_power_state_t *target_state)
- 
- int32_t tegra_soc_pwr_domain_off(const psci_power_state_t *target_state)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint64_t impl = (read_midr() >> MIDR_IMPL_SHIFT) & (uint64_t)MIDR_IMPL_MASK;
- 
- 	(void)target_state;
-@@ -453,6 +464,7 @@ int32_t tegra_soc_pwr_domain_off(const psci_power_state_t *target_state)
- 
- __dead2 void tegra_soc_prepare_system_off(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	/* power off the entire system */
- 	mce_enter_ccplex_state((uint32_t)TEGRA_ARI_MISC_CCPLEX_SHUTDOWN_POWER_OFF);
- 
-@@ -466,6 +478,7 @@ __dead2 void tegra_soc_prepare_system_off(void)
- 
- int32_t tegra_soc_prepare_system_reset(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	mce_enter_ccplex_state((uint32_t)TEGRA_ARI_MISC_CCPLEX_SHUTDOWN_REBOOT);
- 
- 	return PSCI_E_SUCCESS;
-diff --git a/plat/nvidia/tegra/soc/t186/plat_secondary.c b/plat/nvidia/tegra/soc/t186/plat_secondary.c
-index fbb550a..22fec4c 100644
---- a/plat/nvidia/tegra/soc/t186/plat_secondary.c
-+++ b/plat/nvidia/tegra/soc/t186/plat_secondary.c
-@@ -25,6 +25,7 @@
-  ******************************************************************************/
- void plat_secondary_setup(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint32_t addr_low, addr_high;
- 
- 	INFO("Setting up secondary CPU boot\n");
-diff --git a/plat/nvidia/tegra/soc/t186/plat_setup.c b/plat/nvidia/tegra/soc/t186/plat_setup.c
-index db6d405..a910c58 100644
---- a/plat/nvidia/tegra/soc/t186/plat_setup.c
-+++ b/plat/nvidia/tegra/soc/t186/plat_setup.c
-@@ -64,6 +64,7 @@ static const uint8_t tegra_power_domain_tree_desc[] = {
-  ******************************************************************************/
- const uint8_t *plat_get_power_domain_tree_desc(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	return tegra_power_domain_tree_desc;
- }
- 
-@@ -123,6 +124,7 @@ static const mmap_region_t tegra_mmap[] = {
-  ******************************************************************************/
- const mmap_region_t *plat_get_mmio_map(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	/* MMIO space */
- 	return tegra_mmap;
- }
-@@ -132,6 +134,7 @@ const mmap_region_t *plat_get_mmio_map(void)
-  ******************************************************************************/
- uint32_t plat_get_syscnt_freq2(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	return 31250000;
- }
- 
-@@ -159,6 +162,7 @@ static uint32_t tegra186_uart_addresses[TEGRA186_MAX_UART_PORTS + 1] = {
-  ******************************************************************************/
- void plat_enable_console(int32_t id)
- {
-+	INFO("Entering %s\n", __func__);
- 	static console_t uart_console;
- 	uint32_t console_clock;
- 
-@@ -186,6 +190,7 @@ void plat_enable_console(int32_t id)
-  ******************************************************************************/
- void plat_early_platform_setup(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint64_t impl, val;
- 	const bl31_plat_params_t *plat_params = bl31_get_plat_params();
- 	const struct tegra_bl31_params *arg_from_bl2 = plat_get_bl31_params();
-@@ -229,6 +234,7 @@ void plat_early_platform_setup(void)
-  ******************************************************************************/
- void plat_late_platform_setup(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	const bl31_plat_params_t *params_from_bl2 = bl31_get_plat_params();
- 	int ret;
- 
-@@ -258,6 +264,7 @@ static const interrupt_prop_t tegra186_interrupt_props[] = {
-  ******************************************************************************/
- void plat_gic_setup(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	tegra_gic_setup(tegra186_interrupt_props, ARRAY_SIZE(tegra186_interrupt_props));
- 	tegra_gic_init();
- 
-@@ -273,6 +280,7 @@ void plat_gic_setup(void)
-  ******************************************************************************/
- struct tegra_bl31_params *plat_get_bl31_params(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint32_t val;
- 
- 	val = mmio_read_32(TEGRA_SCRATCH_BASE + SCRATCH_BL31_PARAMS_ADDR);
-@@ -285,6 +293,7 @@ struct tegra_bl31_params *plat_get_bl31_params(void)
-  ******************************************************************************/
- bl31_plat_params_t *plat_get_bl31_plat_params(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint32_t val;
- 
- 	val = mmio_read_32(TEGRA_SCRATCH_BASE + SCRATCH_BL31_PLAT_PARAMS_ADDR);
-@@ -300,6 +309,7 @@ bl31_plat_params_t *plat_get_bl31_plat_params(void)
-  ******************************************************************************/
- int32_t plat_core_pos_by_mpidr(u_register_t mpidr)
- {
-+	INFO("Entering %s\n", __func__);
- 	u_register_t cluster_id, cpu_id, pos;
- 	int32_t ret;
- 
-@@ -335,6 +345,7 @@ int32_t plat_core_pos_by_mpidr(u_register_t mpidr)
-  ******************************************************************************/
- void plat_relocate_bl32_image(const image_info_t *bl32_img_info)
- {
-+	INFO("Entering %s\n", __func__);
- 	const bl31_plat_params_t *plat_bl31_params = plat_get_bl31_plat_params();
- 	const entry_point_info_t *bl32_ep_info = bl31_plat_get_next_image_ep_info(SECURE);
- 	uint64_t tzdram_start, tzdram_end, bl32_start, bl32_end;
-@@ -374,6 +385,7 @@ void plat_relocate_bl32_image(const image_info_t *bl32_img_info)
-  ******************************************************************************/
- bool plat_supports_system_suspend(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	return true;
- }
- /*******************************************************************************
-@@ -381,6 +393,7 @@ bool plat_supports_system_suspend(void)
-  ******************************************************************************/
- void plat_runtime_setup(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	/*
- 	 * During cold boot, it is observed that the arbitration
- 	 * bit is set in the Memory controller leading to false
-@@ -414,6 +427,7 @@ void plat_runtime_setup(void)
- static struct bpmp_ipc_platform_data bpmp_ipc;
- struct bpmp_ipc_platform_data *plat_get_bpmp_ipc_data(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	bpmp_ipc.bpmp_ipc_tx_base = TEGRA_BPMP_IPC_TX_PHYS_BASE;
- 	bpmp_ipc.bpmp_ipc_rx_base = TEGRA_BPMP_IPC_RX_PHYS_BASE;
- 	bpmp_ipc.bpmp_ipc_map_size = TEGRA_BPMP_IPC_CH_MAP_SIZE;
-@@ -426,6 +440,7 @@ struct bpmp_ipc_platform_data *plat_get_bpmp_ipc_data(void)
-  ******************************************************************************/
- int32_t tegra_soc_validate_ns_entrypoint(uintptr_t entrypoint)
- {
-+	INFO("Entering %s\n", __func__);
- 	int32_t ret = PSCI_E_INVALID_ADDRESS;
- 
- 	/*
-diff --git a/plat/nvidia/tegra/soc/t186/plat_sip_calls.c b/plat/nvidia/tegra/soc/t186/plat_sip_calls.c
-index 4de8a9e..a6e0aca 100644
---- a/plat/nvidia/tegra/soc/t186/plat_sip_calls.c
-+++ b/plat/nvidia/tegra/soc/t186/plat_sip_calls.c
-@@ -61,6 +61,7 @@ int32_t plat_sip_handler(uint32_t smc_fid,
- 		     void *handle,
- 		     uint64_t flags)
- {
-+	INFO("Entering %s\n", __func__);
- 	int32_t mce_ret, ret = 0;
- 	uint32_t impl, cpu;
- 	uint32_t base, core_clk_ctr, ref_clk_ctr;
 diff --git a/plat/nvidia/tegra/soc/t186/plat_smmu.c b/plat/nvidia/tegra/soc/t186/plat_smmu.c
-index f1bc235..3b763e4 100644
+index f1bc235..b38b955 100644
 --- a/plat/nvidia/tegra/soc/t186/plat_smmu.c
 +++ b/plat/nvidia/tegra/soc/t186/plat_smmu.c
 @@ -5,6 +5,7 @@
@@ -2554,298 +326,8 @@ index f1bc235..3b763e4 100644
  #include <common/bl_common.h>
  
  #include <smmu.h>
-@@ -18,5 +19,6 @@
-  ******************************************************************************/
- uint32_t plat_get_num_smmu_devices(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	return MAX_NUM_SMMU_DEVICES;
- }
-diff --git a/plat/nvidia/tegra/soc/t194/drivers/mce/mce.c b/plat/nvidia/tegra/soc/t194/drivers/mce/mce.c
-index af1c0aa..ecdccf3 100644
---- a/plat/nvidia/tegra/soc/t194/drivers/mce/mce.c
-+++ b/plat/nvidia/tegra/soc/t194/drivers/mce/mce.c
-@@ -28,6 +28,7 @@
- /* Handler to check if MCE firmware is supported */
- static bool mce_firmware_not_supported(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	bool status;
- 
- 	/* these platforms do not load MCE firmware */
-@@ -43,6 +44,7 @@ static bool mce_firmware_not_supported(void)
- int32_t mce_command_handler(uint64_t cmd, uint64_t arg0, uint64_t arg1,
- 			uint64_t arg2)
- {
-+	INFO("Entering %s\n", __func__);
- 	int32_t ret = 0;
- 
- 	switch (cmd) {
-@@ -84,6 +86,7 @@ int32_t mce_command_handler(uint64_t cmd, uint64_t arg0, uint64_t arg1,
-  ******************************************************************************/
- int32_t mce_update_gsc_videomem(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	int32_t ret;
- 
- 	/*
-@@ -103,6 +106,7 @@ int32_t mce_update_gsc_videomem(void)
-  ******************************************************************************/
- int32_t mce_update_gsc_tzdram(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	int32_t ret;
- 
- 	/*
-@@ -122,6 +126,7 @@ int32_t mce_update_gsc_tzdram(void)
-  ******************************************************************************/
- void mce_update_cstate_info(const mce_cstate_info_t *cstate)
- {
-+	INFO("Entering %s\n", __func__);
- 	/* issue the UPDATE_CSTATE_INFO request */
- 	nvg_update_cstate_info(cstate->cluster, cstate->ccplex, cstate->system,
- 		cstate->wake_mask, cstate->update_wake_mask);
-@@ -133,6 +138,7 @@ void mce_update_cstate_info(const mce_cstate_info_t *cstate)
-  ******************************************************************************/
- void mce_verify_firmware_version(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint64_t version;
- 	uint32_t major, minor;
- 
-@@ -175,6 +181,7 @@ void mce_verify_firmware_version(void)
-  ******************************************************************************/
- void mce_enable_strict_checking(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint64_t sctlr = read_sctlr_el3();
- 	int32_t ret = 0;
- 
-@@ -221,6 +228,7 @@ void mce_enable_strict_checking(void)
- }
- void mce_verify_strict_checking(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	bool is_silicon = tegra_platform_is_silicon();
- 	bool is_fpga = tegra_platform_is_fpga();
- 
-@@ -235,6 +243,7 @@ void mce_verify_strict_checking(void)
-  ******************************************************************************/
- void mce_system_shutdown(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	nvg_system_shutdown();
- }
- 
-@@ -243,6 +252,7 @@ void mce_system_shutdown(void)
-  ******************************************************************************/
- void mce_system_reboot(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	nvg_system_reboot();
- }
- 
-@@ -251,5 +261,6 @@ void mce_system_reboot(void)
-  ******************************************************************************/
- void mce_clear_hsm_corr_status(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	nvg_clear_hsm_corr_status();
- }
-diff --git a/plat/nvidia/tegra/soc/t194/drivers/mce/nvg.c b/plat/nvidia/tegra/soc/t194/drivers/mce/nvg.c
-index f76ab14..b9cc74a 100644
---- a/plat/nvidia/tegra/soc/t194/drivers/mce/nvg.c
-+++ b/plat/nvidia/tegra/soc/t194/drivers/mce/nvg.c
-@@ -28,6 +28,7 @@
-  */
- uint64_t nvg_get_version(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	nvg_set_request((uint64_t)TEGRA_NVG_CHANNEL_VERSION);
- 
- 	return (uint64_t)nvg_get_result();
-@@ -41,6 +42,7 @@ uint64_t nvg_get_version(void)
-  */
- void nvg_set_wake_time(uint32_t wake_time)
- {
-+	INFO("Entering %s\n", __func__);
- 	/* time (TSC ticks) until the core is expected to get a wake event */
- 	nvg_set_request_data((uint64_t)TEGRA_NVG_CHANNEL_WAKE_TIME, (uint64_t)wake_time);
- }
-@@ -61,6 +63,7 @@ void nvg_set_wake_time(uint32_t wake_time)
- void nvg_update_cstate_info(uint32_t cluster, uint32_t ccplex,
- 		uint32_t system, uint32_t wake_mask, uint8_t update_wake_mask)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint64_t val = 0;
- 
- 	/* update CLUSTER_CSTATE? */
-@@ -100,6 +103,7 @@ void nvg_update_cstate_info(uint32_t cluster, uint32_t ccplex,
-  */
- int32_t nvg_is_sc7_allowed(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	/* issue command to check if SC7 is allowed */
- 	nvg_set_request((uint64_t)TEGRA_NVG_CHANNEL_IS_SC7_ALLOWED);
- 
-@@ -115,6 +119,7 @@ int32_t nvg_is_sc7_allowed(void)
-  */
- int32_t nvg_online_core(uint32_t core)
- {
-+	INFO("Entering %s\n", __func__);
- 	int32_t ret = 0;
- 
- 	/* sanity check the core ID value */
-@@ -138,6 +143,7 @@ int32_t nvg_online_core(uint32_t core)
-  */
- int32_t nvg_update_ccplex_gsc(uint32_t gsc_idx)
- {
-+	INFO("Entering %s\n", __func__);
- 	int32_t ret = 0;
- 
- 	/* sanity check GSC ID */
-@@ -157,6 +163,7 @@ int32_t nvg_update_ccplex_gsc(uint32_t gsc_idx)
-  */
- int32_t nvg_roc_clean_cache_trbits(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	int32_t ret = 0;
- 
- 	/* check if cache flush through mts is supported */
-@@ -178,6 +185,7 @@ int32_t nvg_roc_clean_cache_trbits(void)
-  */
- int32_t nvg_enter_cstate(uint32_t state, uint32_t wake_time)
- {
-+	INFO("Entering %s\n", __func__);
- 	int32_t ret = 0;
- 	uint64_t val = 0ULL;
- 
-@@ -209,6 +217,7 @@ int32_t nvg_enter_cstate(uint32_t state, uint32_t wake_time)
-  */
- void nvg_enable_strict_checking_mode(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint64_t params = (uint64_t)(STRICT_CHECKING_ENABLED_SET |
- 				     STRICT_CHECKING_LOCKED_SET);
- 
-@@ -217,6 +226,7 @@ void nvg_enable_strict_checking_mode(void)
- 
- void nvg_verify_strict_checking_mode(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint64_t params = (uint64_t)(STRICT_CHECKING_ENABLED_SET |
- 				     STRICT_CHECKING_LOCKED_SET);
- 
-@@ -232,6 +242,7 @@ void nvg_verify_strict_checking_mode(void)
-  */
- void nvg_system_reboot(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	/* issue command for reboot */
- 	nvg_set_request_data((uint64_t)TEGRA_NVG_CHANNEL_SHUTDOWN,
- 			     (uint64_t)TEGRA_NVG_REBOOT);
-@@ -244,6 +255,7 @@ void nvg_system_reboot(void)
-  */
- void nvg_system_shutdown(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	/* issue command for shutdown */
- 	nvg_set_request_data((uint64_t)TEGRA_NVG_CHANNEL_SHUTDOWN,
- 			     (uint64_t)TEGRA_NVG_SHUTDOWN);
-@@ -256,6 +268,7 @@ void nvg_system_shutdown(void)
-  */
- void nvg_clear_hsm_corr_status(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	nvg_hsm_error_ctrl_channel_t status = { .bits = { .corr = 1U, }, };
- 
- 	nvg_set_request_data((uint64_t)TEGRA_NVG_CHANNEL_HSM_ERROR_CTRL, status.flat);
-diff --git a/plat/nvidia/tegra/soc/t194/drivers/se/se.c b/plat/nvidia/tegra/soc/t194/drivers/se/se.c
-index fbdac58..e37abdd 100644
---- a/plat/nvidia/tegra/soc/t194/drivers/se/se.c
-+++ b/plat/nvidia/tegra/soc/t194/drivers/se/se.c
-@@ -52,6 +52,7 @@ static uint32_t se_regs[NUM_SE_REGS_TO_SAVE];
-  */
- static bool tegra_se_is_operation_complete(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint32_t val = 0, timeout = 0, sha_status, aes_status;
- 	int32_t ret = 0;
- 	bool se_is_busy, txn_has_errors, txn_successful;
-@@ -97,6 +98,7 @@ static bool tegra_se_is_operation_complete(void)
-  */
- static bool tegra_se_is_ready(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	int32_t ret = 0;
- 	uint32_t val = 0, timeout = 0;
- 	bool se_is_ready;
-@@ -140,6 +142,7 @@ static bool tegra_se_is_ready(void)
-  */
- static int32_t tegra_se_save_context(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	int32_t ret = -ECANCELED;
- 
- 	/*
-@@ -192,6 +195,7 @@ static int32_t tegra_se_save_context(void)
-  */
- static int32_t tegra_se_sha256_hash_operation_complete(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint32_t val = 0U;
- 
- 	/* Poll the SE interrupt register to ensure H/W operation complete */
-@@ -229,6 +233,7 @@ static int32_t tegra_se_sha256_hash_operation_complete(void)
- static int32_t tegra_se_start_normal_operation(uint64_t src_addr,
- 		uint32_t nbytes, uint32_t last_buf, uint32_t src_len_inbytes)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint32_t val = 0U;
- 	uint32_t src_in_lo;
- 	uint32_t src_in_msb;
-@@ -272,6 +277,7 @@ static int32_t tegra_se_start_normal_operation(uint64_t src_addr,
- static int32_t tegra_se_calculate_sha256_hash(uint64_t src_addr,
- 						uint32_t src_len_inbyte)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint32_t val, last_buf, i;
- 	int32_t ret = 0;
- 	uint32_t operations;
-@@ -384,6 +390,7 @@ static int32_t tegra_se_calculate_sha256_hash(uint64_t src_addr,
- 
- static int32_t tegra_se_save_sha256_pmc_scratch(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint32_t val = 0U, hash_offset = 0U, scratch_offset = 0U;
- 	int32_t ret;
- 
-@@ -411,6 +418,7 @@ static int32_t tegra_se_save_sha256_pmc_scratch(void)
- int32_t tegra_se_calculate_save_sha256(uint64_t src_addr,
- 						uint32_t src_len_inbyte)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint32_t security;
- 	int32_t val = 0;
- 
-@@ -452,6 +460,7 @@ int32_t tegra_se_calculate_save_sha256(uint64_t src_addr,
-  */
- int32_t tegra_se_suspend(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	int32_t ret = 0;
- 
- 	/* initialise communication channel with BPMP */
-@@ -485,6 +494,7 @@ int32_t tegra_se_suspend(void)
-  */
- void tegra_se_resume(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	int32_t ret = 0;
- 
- 	/* initialise communication channel with BPMP */
 diff --git a/plat/nvidia/tegra/soc/t194/plat_memctrl.c b/plat/nvidia/tegra/soc/t194/plat_memctrl.c
-index 2182699..388a7da 100644
+index 2182699..6544190 100644
 --- a/plat/nvidia/tegra/soc/t194/plat_memctrl.c
 +++ b/plat/nvidia/tegra/soc/t194/plat_memctrl.c
 @@ -4,6 +4,7 @@
@@ -2856,364 +338,6 @@ index 2182699..388a7da 100644
  #include <assert.h>
  #include <common/bl_common.h>
  #include <mce.h>
-@@ -25,6 +26,7 @@ static __attribute__((aligned(16))) mc_regs_t tegra194_mc_context[] = {
-  ******************************************************************************/
- mc_regs_t *plat_memctrl_get_sys_suspend_ctx(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	/* index of _END_OF_TABLE_ */
- 	tegra194_mc_context[0].val = (uint32_t)ARRAY_SIZE(tegra194_mc_context) - 1U;
- 
-@@ -36,6 +38,7 @@ mc_regs_t *plat_memctrl_get_sys_suspend_ctx(void)
-  ******************************************************************************/
- void plat_memctrl_restore(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	UNUSED_FUNC_NOP(); /* do nothing */
- }
- 
-@@ -44,6 +47,7 @@ void plat_memctrl_restore(void)
-  ******************************************************************************/
- void plat_memctrl_setup(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	/*
- 	 * All requests at boot time, and certain requests during
- 	 * normal run time, are physically addressed and must bypass
-@@ -67,6 +71,7 @@ void plat_memctrl_setup(void)
-  ******************************************************************************/
- void plat_memctrl_tzdram_setup(uint64_t phys_base, uint64_t size_in_bytes)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint32_t sec_reg_ctrl = tegra_mc_read_32(MC_SECURITY_CFG_REG_CTRL_0);
- 	uint32_t phys_base_lo = (uint32_t)phys_base & 0xFFF00000;
- 	uint32_t phys_base_hi = (uint32_t)(phys_base >> 32);
-diff --git a/plat/nvidia/tegra/soc/t194/plat_psci_handlers.c b/plat/nvidia/tegra/soc/t194/plat_psci_handlers.c
-index 7578f0a..a876607 100644
---- a/plat/nvidia/tegra/soc/t194/plat_psci_handlers.c
-+++ b/plat/nvidia/tegra/soc/t194/plat_psci_handlers.c
-@@ -50,6 +50,7 @@ static struct t19x_psci_percpu_data {
- int32_t tegra_soc_validate_power_state(uint32_t power_state,
- 					psci_power_state_t *req_state)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint8_t state_id = (uint8_t)psci_get_pstate_id(power_state) &
- 			   TEGRA194_STATE_ID_MASK;
- 	uint32_t cpu = plat_my_core_pos();
-@@ -94,6 +95,7 @@ int32_t tegra_soc_validate_power_state(uint32_t power_state,
- 
- int32_t tegra_soc_cpu_standby(plat_local_state_t cpu_state)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint32_t cpu = plat_my_core_pos();
- 	mce_cstate_info_t cstate_info = { 0 };
- 
-@@ -113,6 +115,7 @@ int32_t tegra_soc_cpu_standby(plat_local_state_t cpu_state)
- 
- int32_t tegra_soc_pwr_domain_suspend(const psci_power_state_t *target_state)
- {
-+	INFO("Entering %s\n", __func__);
- 	const plat_local_state_t *pwr_domain_state;
- 	uint8_t stateid_afflvl2;
- 	bl31_plat_params_t *params_from_bl2 = bl31_get_plat_params();
-@@ -184,6 +187,7 @@ int32_t tegra_soc_pwr_domain_suspend(const psci_power_state_t *target_state)
- static bool tegra_last_on_cpu_in_cluster(const plat_local_state_t *states,
- 			uint32_t ncpu)
- {
-+	INFO("Entering %s\n", __func__);
- 	plat_local_state_t target;
- 	bool last_on_cpu = true;
- 	uint32_t num_cpus = ncpu, pos = 0;
-@@ -206,6 +210,7 @@ static bool tegra_last_on_cpu_in_cluster(const plat_local_state_t *states,
- static plat_local_state_t tegra_get_afflvl1_pwr_state(const plat_local_state_t *states,
- 			uint32_t ncpu)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint32_t core_pos = (uint32_t)read_mpidr() & (uint32_t)MPIDR_CPU_MASK;
- 	plat_local_state_t target = states[core_pos];
- 	mce_cstate_info_t cstate_info = { 0 };
-@@ -243,6 +248,7 @@ plat_local_state_t tegra_soc_get_target_pwr_state(uint32_t lvl,
- 					     const plat_local_state_t *states,
- 					     uint32_t ncpu)
- {
-+	INFO("Entering %s\n", __func__);
- 	plat_local_state_t target = PSCI_LOCAL_STATE_RUN;
- 	uint32_t cpu = plat_my_core_pos();
- 
-@@ -262,6 +268,7 @@ plat_local_state_t tegra_soc_get_target_pwr_state(uint32_t lvl,
- 
- int32_t tegra_soc_pwr_domain_power_down_wfi(const psci_power_state_t *target_state)
- {
-+	INFO("Entering %s\n", __func__);
- 	const plat_local_state_t *pwr_domain_state =
- 		target_state->pwr_domain_state;
- 	bl31_plat_params_t *params_from_bl2 = bl31_get_plat_params();
-@@ -315,11 +322,13 @@ int32_t tegra_soc_pwr_domain_power_down_wfi(const psci_power_state_t *target_sta
- 
- int32_t tegra_soc_pwr_domain_suspend_pwrdown_early(const psci_power_state_t *target_state)
- {
-+	INFO("Entering %s\n", __func__);
- 	return PSCI_E_NOT_SUPPORTED;
- }
- 
- int32_t tegra_soc_pwr_domain_on(u_register_t mpidr)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint64_t target_cpu = mpidr & MPIDR_CPU_MASK;
- 	uint64_t target_cluster = (mpidr & MPIDR_CLUSTER_MASK) >>
- 			MPIDR_AFFINITY_BITS;
-@@ -344,6 +353,7 @@ int32_t tegra_soc_pwr_domain_on(u_register_t mpidr)
- 
- int32_t tegra_soc_pwr_domain_on_finish(const psci_power_state_t *target_state)
- {
-+	INFO("Entering %s\n", __func__);
- 	const bl31_plat_params_t *params_from_bl2 = bl31_get_plat_params();
- 	uint8_t enable_ccplex_lock_step = params_from_bl2->enable_ccplex_lock_step;
- 	uint8_t stateid_afflvl2 = target_state->pwr_domain_state[PLAT_MAX_PWR_LVL];
-@@ -492,6 +502,7 @@ int32_t tegra_soc_pwr_domain_on_finish(const psci_power_state_t *target_state)
- 
- int32_t tegra_soc_pwr_domain_off(const psci_power_state_t *target_state)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint64_t impl = (read_midr() >> MIDR_IMPL_SHIFT) & MIDR_IMPL_MASK;
- 	int32_t ret = 0;
- 
-@@ -512,6 +523,7 @@ int32_t tegra_soc_pwr_domain_off(const psci_power_state_t *target_state)
- 
- __dead2 void tegra_soc_prepare_system_off(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	/* System power off */
- 	mce_system_shutdown();
- 
-@@ -525,6 +537,7 @@ __dead2 void tegra_soc_prepare_system_off(void)
- 
- int32_t tegra_soc_prepare_system_reset(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	/* System reboot */
- 	mce_system_reboot();
- 
-diff --git a/plat/nvidia/tegra/soc/t194/plat_ras.c b/plat/nvidia/tegra/soc/t194/plat_ras.c
-index ec9d86c..2dcb681 100644
---- a/plat/nvidia/tegra/soc/t194/plat_ras.c
-+++ b/plat/nvidia/tegra/soc/t194/plat_ras.c
-@@ -51,6 +51,7 @@ static DEFINE_BAKERY_LOCK(ras_handler_lock);
- static void tegra194_ea_handler(unsigned int ea_reason, uint64_t syndrome,
- 		void *cookie, void *handle, uint64_t flags)
- {
-+	INFO("Entering %s\n", __func__);
- 	int32_t ret;
- 
- 	ras_lock();
-@@ -81,6 +82,7 @@ static void tegra194_ea_handler(unsigned int ea_reason, uint64_t syndrome,
-  */
- void tegra194_ras_enable(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	VERBOSE("%s\n", __func__);
- 
- 	/* skip RAS enablement if not a silicon platform. */
-@@ -166,6 +168,7 @@ void tegra194_ras_enable(void)
-  */
- void tegra194_ras_corrected_err_clear(uint64_t *cookie)
- {
-+	INFO("Entering %s\n", __func__);
- 	/*
- 	 * 'last_node' and 'last_idx' represent last visited RAS node index from
- 	 * previous function call. they are set to 0 when first smc call is made
-@@ -256,6 +259,7 @@ void tegra194_ras_corrected_err_clear(uint64_t *cookie)
- static int32_t tegra194_ras_record_probe(const struct err_record_info *info,
- 		int *probe_data)
- {
-+	INFO("Entering %s\n", __func__);
- 	/* Skip probing if not a silicon platform */
- 	if (!tegra_platform_is_silicon()) {
- 		return 0;
-@@ -268,6 +272,7 @@ static int32_t tegra194_ras_record_probe(const struct err_record_info *info,
- static int32_t tegra194_ras_node_handler(uint32_t errselr, const char *name,
- 		const struct ras_error *errors, uint64_t status)
- {
-+	INFO("Entering %s\n", __func__);
- 	bool found = false;
- 	uint32_t ierr = (uint32_t)ERR_STATUS_GET_FIELD(status, IERR);
- 	uint32_t serr = (uint32_t)ERR_STATUS_GET_FIELD(status, SERR);
-@@ -356,6 +361,7 @@ static int32_t tegra194_ras_node_handler(uint32_t errselr, const char *name,
- static int32_t tegra194_ras_record_handler(const struct err_record_info *info,
- 		int probe_data, const struct err_handler_data *const data __unused)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint32_t num_idx = info->sysreg.num_idx;
- 	uint32_t idx_start = info->sysreg.idx_start;
- 	const struct ras_aux_data *aux_data = info->aux_data;
-@@ -484,6 +490,7 @@ REGISTER_RAS_INTERRUPTS(carmel_ras_interrupts);
- void plat_ea_handler(unsigned int ea_reason, uint64_t syndrome, void *cookie,
- 		void *handle, uint64_t flags)
- {
-+	INFO("Entering %s\n", __func__);
- #if RAS_EXTENSION
- 	tegra194_ea_handler(ea_reason, syndrome, cookie, handle, flags);
- #else
-diff --git a/plat/nvidia/tegra/soc/t194/plat_secondary.c b/plat/nvidia/tegra/soc/t194/plat_secondary.c
-index 9abbfab..5f46b05 100644
---- a/plat/nvidia/tegra/soc/t194/plat_secondary.c
-+++ b/plat/nvidia/tegra/soc/t194/plat_secondary.c
-@@ -28,6 +28,7 @@ extern uint64_t tegra_bl31_phys_base;
-  ******************************************************************************/
- void plat_secondary_setup(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint32_t addr_low, addr_high;
- 	bl31_plat_params_t *params_from_bl2 = bl31_get_plat_params();
- 	uint64_t cpu_reset_handler_base, cpu_reset_handler_size, tzdram_addr;
-diff --git a/plat/nvidia/tegra/soc/t194/plat_setup.c b/plat/nvidia/tegra/soc/t194/plat_setup.c
-index ce23db7..b3c999b 100644
---- a/plat/nvidia/tegra/soc/t194/plat_setup.c
-+++ b/plat/nvidia/tegra/soc/t194/plat_setup.c
-@@ -80,6 +80,7 @@ static const uint8_t tegra_power_domain_tree_desc[] = {
-  ******************************************************************************/
- const uint8_t *plat_get_power_domain_tree_desc(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	return tegra_power_domain_tree_desc;
- }
- 
-@@ -143,6 +144,7 @@ static const mmap_region_t tegra_mmap[] = {
-  ******************************************************************************/
- const mmap_region_t *plat_get_mmio_map(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	/* MMIO space */
- 	return tegra_mmap;
- }
-@@ -152,6 +154,7 @@ const mmap_region_t *plat_get_mmio_map(void)
-  ******************************************************************************/
- uint32_t plat_get_syscnt_freq2(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	return 31250000;
- }
- 
-@@ -181,6 +184,7 @@ static uint32_t tegra194_uart_addresses[TEGRA194_MAX_UART_PORTS + 1] = {
-  ******************************************************************************/
- void plat_enable_console(int32_t id)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint32_t console_clock = 0U;
- 
- #if ENABLE_CONSOLE_SPE
-@@ -222,6 +226,7 @@ void plat_enable_console(int32_t id)
-  ******************************************************************************/
- static inline bool tegra194_is_scr_valid(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint32_t scr_val;
- 	bool ret = true;
- 
-@@ -240,6 +245,7 @@ static inline bool tegra194_is_scr_valid(void)
-  ******************************************************************************/
- void plat_early_platform_setup(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	const bl31_plat_params_t *params_from_bl2 = bl31_get_plat_params();
- 	uint8_t enable_ccplex_lock_step = params_from_bl2->enable_ccplex_lock_step;
- 	uint64_t actlr_elx;
-@@ -378,6 +384,7 @@ static const interrupt_prop_t tegra194_interrupt_props[] = {
-  ******************************************************************************/
- void plat_gic_setup(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	tegra_gic_setup(tegra194_interrupt_props, ARRAY_SIZE(tegra194_interrupt_props));
- 	tegra_gic_init();
- 
-@@ -392,6 +399,7 @@ void plat_gic_setup(void)
-  ******************************************************************************/
- struct tegra_bl31_params *plat_get_bl31_params(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint64_t val;
- 
- 	val = (mmio_read_32(TEGRA_SCRATCH_BASE + SCRATCH_BL31_PARAMS_HI_ADDR) &
-@@ -407,6 +415,7 @@ struct tegra_bl31_params *plat_get_bl31_params(void)
-  ******************************************************************************/
- bl31_plat_params_t *plat_get_bl31_plat_params(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint64_t val;
- 
- 	val = (mmio_read_32(TEGRA_SCRATCH_BASE + SCRATCH_BL31_PLAT_PARAMS_HI_ADDR) &
-@@ -422,6 +431,7 @@ bl31_plat_params_t *plat_get_bl31_plat_params(void)
-  ******************************************************************************/
- void plat_late_platform_setup(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	/* Initialize SMMU registers */
- 	tegra_smmu_init();
- 
-@@ -440,6 +450,7 @@ void plat_late_platform_setup(void)
-  ******************************************************************************/
- bool plat_supports_system_suspend(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	return true;
- }
- 
-@@ -448,6 +459,7 @@ bool plat_supports_system_suspend(void)
-  ******************************************************************************/
- void plat_runtime_setup(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	/*
- 	 * During cold boot, it is observed that the arbitration
- 	 * bit is set in the Memory controller leading to false
-@@ -480,6 +492,7 @@ void plat_runtime_setup(void)
- static struct bpmp_ipc_platform_data bpmp_ipc;
- struct bpmp_ipc_platform_data *plat_get_bpmp_ipc_data(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	bpmp_ipc.bpmp_ipc_tx_base = TEGRA_BPMP_IPC_TX_PHYS_BASE;
- 	bpmp_ipc.bpmp_ipc_rx_base = TEGRA_BPMP_IPC_RX_PHYS_BASE;
- 	bpmp_ipc.bpmp_ipc_map_size = TEGRA_BPMP_IPC_CH_MAP_SIZE;
-@@ -492,6 +505,7 @@ struct bpmp_ipc_platform_data *plat_get_bpmp_ipc_data(void)
-  ******************************************************************************/
- int32_t tegra_soc_validate_ns_entrypoint(uintptr_t entrypoint)
- {
-+	INFO("Entering %s\n", __func__);
- 	int32_t ret = PSCI_E_INVALID_ADDRESS;
- 
- 	/*
-diff --git a/plat/nvidia/tegra/soc/t194/plat_sip_calls.c b/plat/nvidia/tegra/soc/t194/plat_sip_calls.c
-index 35f7302..a67714e 100644
---- a/plat/nvidia/tegra/soc/t194/plat_sip_calls.c
-+++ b/plat/nvidia/tegra/soc/t194/plat_sip_calls.c
-@@ -38,6 +38,7 @@ int32_t plat_sip_handler(uint32_t smc_fid,
- 		     void *handle,
- 		     uint64_t flags)
- {
-+	INFO("Entering %s\n", __func__);
- 	int32_t ret = 0;
- 	uint32_t i, smmu_per[6] = {0};
- 	uint32_t num_smmu_devices = plat_get_num_smmu_devices();
-diff --git a/plat/nvidia/tegra/soc/t194/plat_smmu.c b/plat/nvidia/tegra/soc/t194/plat_smmu.c
-index 310e951..35f3708 100644
---- a/plat/nvidia/tegra/soc/t194/plat_smmu.c
-+++ b/plat/nvidia/tegra/soc/t194/plat_smmu.c
-@@ -15,6 +15,7 @@
- 
- static uint32_t tegra_misc_read_32(uint32_t off)
- {
-+	INFO("Entering %s\n", __func__);
- 	return mmio_read_32((uintptr_t)TEGRA_MISC_BASE + off);
- }
- 
-@@ -23,6 +24,7 @@ static uint32_t tegra_misc_read_32(uint32_t off)
-  ******************************************************************************/
- uint32_t plat_get_num_smmu_devices(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint32_t ret_num = MAX_NUM_SMMU_DEVICES;
- 	uint32_t board_revid = ((tegra_misc_read_32(MISCREG_EMU_REVID) >> \
- 							BOARD_SHIFT_BITS) & BOARD_MASK_BITS);
 diff --git a/plat/nvidia/tegra/soc/t234/drivers/include/mce_private.h b/plat/nvidia/tegra/soc/t234/drivers/include/mce_private.h
 index 159469e..26a7620 100644
 --- a/plat/nvidia/tegra/soc/t234/drivers/include/mce_private.h
@@ -3244,174 +368,141 @@ index 1df2dd4..2fe9cb0 100644
 +
  #endif /* T234_ARI_H */
 diff --git a/plat/nvidia/tegra/soc/t234/drivers/mce/ari.c b/plat/nvidia/tegra/soc/t234/drivers/mce/ari.c
-index f9f71a3..f30c621 100644
+index f9f71a3..b9deddc 100644
 --- a/plat/nvidia/tegra/soc/t234/drivers/mce/ari.c
 +++ b/plat/nvidia/tegra/soc/t234/drivers/mce/ari.c
-@@ -16,6 +16,8 @@
+@@ -16,6 +16,10 @@
  #include <errno.h>
  #include <t234_ari.h>
  #include <tegra_private.h>
 +#include <plat/common/platform.h>
++#include <tegra234_ras_private.h>
++#include <drivers/arm/gicv3.h>
 +
  
  /******************************************************************************
   * Custom macros
-@@ -66,26 +68,31 @@ static uint32_t cluster_bitmap = U(0xDEADF00D);
-  *****************************************************************************/
- static inline uint32_t ari_read_32(uint32_t ari_base, uint32_t reg)
- {
-+	INFO("Entering %s\n", __func__);
- 	return mmio_read_32((uint64_t)ari_base + (uint64_t)reg);
+@@ -100,62 +104,63 @@ static void ari_request_send_command(uint32_t ari_base, uint32_t evt_mask,
  }
  
- static inline void ari_write_32(uint32_t ari_base, uint32_t val, uint32_t reg)
- {
-+	INFO("Entering %s\n", __func__);
- 	mmio_write_32((uint64_t)ari_base + (uint64_t)reg, val);
- }
- 
- static inline uint32_t ari_get_response_low(uint32_t ari_base)
- {
-+	INFO("Entering %s\n", __func__);
- 	return ari_read_32(ari_base, ARI_RESPONSE_DATA_LO);
- }
- 
- static inline uint32_t ari_get_response_high(uint32_t ari_base)
- {
-+	INFO("Entering %s\n", __func__);
- 	return ari_read_32(ari_base, ARI_RESPONSE_DATA_HI);
- }
- 
- static inline void ari_clobber_response(uint32_t ari_base)
- {
-+	INFO("Entering %s\n", __func__);
- 	ari_write_32(ari_base, 0, ARI_RESPONSE_DATA_LO);
- 	ari_write_32(ari_base, 0, ARI_RESPONSE_DATA_HI);
- }
-@@ -93,6 +100,7 @@ static inline void ari_clobber_response(uint32_t ari_base)
- static void ari_request_send_command(uint32_t ari_base, uint32_t evt_mask,
- 		uint32_t req, uint32_t lo, uint32_t hi)
- {
-+	INFO("Entering %s\n", __func__);
- 	ari_write_32(ari_base, lo, ARI_REQUEST_DATA_LO);
- 	ari_write_32(ari_base, hi, ARI_REQUEST_DATA_HI);
- 	ari_write_32(ari_base, evt_mask, ARI_REQUEST_EVENT_MASK);
-@@ -102,6 +110,7 @@ static void ari_request_send_command(uint32_t ari_base, uint32_t evt_mask,
  static uint32_t ari_request_wait(uint32_t ari_base, uint32_t evt_mask,
- 		uint32_t req, uint32_t lo, uint32_t hi)
+-		uint32_t req, uint32_t lo, uint32_t hi)
++        uint32_t req, uint32_t lo, uint32_t hi)
  {
-+	INFO("Entering %s\n", __func__);
- 	uint32_t retries = ARI_MAX_RETRY_COUNT;
- 	uint32_t status;
- 	uint32_t ret = 0U;
-@@ -151,7 +160,8 @@ static uint32_t ari_request_wait(uint32_t ari_base, uint32_t evt_mask,
- 		/* assert if the command timed out */
- 		if (retries == 0U) {
- 			ERROR("ARI request timed out: req %d\n", req);
+-	uint32_t retries = ARI_MAX_RETRY_COUNT;
+-	uint32_t status;
+-	uint32_t ret = 0U;
++    uint32_t status;
++    uint32_t ret = 0U;
++
++    ari_write_32(ari_base, 0, ARI_RESPONSE_DATA_LO);
++    ari_write_32(ari_base, 0, ARI_RESPONSE_DATA_HI);
++    ari_request_send_command(ari_base, evt_mask, req, lo, hi);
++
++    if (evt_mask == 0U) {
++        /*
++         * Poll for up to ARI_MAX_RETRY_COUNT iterations.
++         * Use WFI to avoid burning 100% CPU while waiting —
++         * without WFI, simultaneous spinning across all cores
++         * causes thermal shutdown before BPMP thermal management
++         * is active during Xen secondary CPU bring-up.
++         */
++        uint32_t retries = ARI_MAX_RETRY_COUNT;
++
++        while (retries != 0U) {
++            status = ari_read_32(ari_base, ARI_STATUS);
++            if ((status & (ARI_REQ_ONGOING | ARI_REQ_PENDING |
++                     ARI_REQ_STATUS_MASK)) == 0U) {
++                break;
++            }
++
++            if ((status & ARI_REQ_STATUS_MASK) != 0U) {
++                ret = ((status & ARI_REQ_STATUS_MASK) >> 2);
++                ERROR("ARI request get error: 0x%x\n", ret);
++                return ret;
++            }
+ 
+-	/*
+-	 * For each ARI command, the registers that are not used are listed
+-	 * as "Must be set to 0", MCE firmware enforce a check for it.
+-	 * Clear response lo/hi data before sending out command.
+-	 */
+-	ari_write_32(ari_base, 0, ARI_RESPONSE_DATA_LO);
+-	ari_write_32(ari_base, 0, ARI_RESPONSE_DATA_HI);
+-
+-	/* program the request, event_mask, hi and lo registers */
+-	ari_request_send_command(ari_base, evt_mask, req, lo, hi);
+-
+-	/*
+-	 * For commands that have an event trigger, we should stop
+-	 * ARI_STATUS polling, since MCE is waiting for SW to trigger
+-	 * the event.
+-	 */
+-	/* For shutdown/reboot commands, use function ari_request_send_command() */
+-	if (evt_mask == 0U) {
+-		/*
+-		 * Wait for the command response for not more than the timeout
+-		 */
+-		while (retries != 0U) {
+-			/* read the command status */
+-			status = ari_read_32(ari_base, ARI_STATUS);
+-			if ((status & (ARI_REQ_ONGOING | ARI_REQ_PENDING |
+-				 ARI_REQ_STATUS_MASK)) == 0U) {
+-				break;
+-			}
+-
+-			if ((status & ARI_REQ_STATUS_MASK) != 0U) {
+-				ret = ((status & ARI_REQ_STATUS_MASK) >> 2);
+-				ERROR("ARI request get error: 0x%x\n", ret);
+-				return ret;
+-			}
+-
+-			/* delay 1 us */
+ 			udelay(1);
+-
+-			/* decrement the retry count */
+-			retries--;
+-		}
+-
+-		/* assert if the command timed out */
+-		if (retries == 0U) {
+-			ERROR("ARI request timed out: req %d\n", req);
 -			assert(retries != 0U);
-+			//assert(retries != 0U);
++            retries--;
++        }
++
++        if (retries == 0U) {
++			ERROR("ARI request timed out: req %d, status=0x%x\n",
++				req, ari_read_32(ari_base, ARI_STATUS));
++			/*
++			* Issue KILL to abort any in-flight MCE transaction.
++			* If ARI_REQ_ONGOING is set, MCE FW is mid-transaction
++			* and will not accept new requests until killed.
++			*/
++			ari_write_32(ari_base, ARI_REQUEST_VALID_BIT | ARI_REQUEST_KILL_BIT,
++						ARI_REQUEST);
++			dsbsy();
++			isb();
++			udelay(100);
++			ari_write_32(ari_base, 0U, ARI_REQUEST);
++			dsbsy();
++			isb();
 +			return ARI_REQ_EXECUTION_ERROR;
  		}
- 	}
+-	}
++    }
  
-@@ -165,6 +175,7 @@ static uint32_t ari_request_wait(uint32_t ari_base, uint32_t evt_mask,
+-	return 0;
++    return 0;
+ }
+ 
+ /*
+@@ -512,16 +517,78 @@ bool ari_is_sc7_allowed(uint32_t ari_base)
+  * core: MPIDR Linear Core ID of the core to bring online.
+  * ret: error status, 0 indicate no error.
   */
- uint64_t ari_get_version(uint32_t ari_base)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint64_t ret;
- 
- 	/* clean the previous response state */
-@@ -190,6 +201,7 @@ uint64_t ari_get_version(uint32_t ari_base)
-  */
- uint32_t ari_num_cores(uint32_t ari_base)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint32_t ret;
- 
- 	/* clean the previous response state */
-@@ -216,6 +228,7 @@ uint32_t ari_num_cores(uint32_t ari_base)
-  */
- uint32_t ari_cluster_present_map(uint32_t ari_base)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint32_t ret;
- 
- 	if (cluster_bitmap != U(0xDEADF00D)) {
-@@ -245,6 +258,7 @@ uint32_t ari_cluster_present_map(uint32_t ari_base)
-  */
- static uint32_t ari_cluster_warm_reset(uint32_t ari_base, uint32_t cluster_id)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint32_t ret;
- 
- 	assert(cluster_id < PLATFORM_CLUSTER_COUNT);
-@@ -285,6 +299,7 @@ static uint32_t ari_cluster_warm_reset(uint32_t ari_base, uint32_t cluster_id)
- uint32_t ari_core_debug_recovery(uint32_t ari_base, uint32_t core_id,
- 	 bool core_warm_reset)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint32_t request, ret;
- 
- 	assert(core_id <
-@@ -335,6 +350,7 @@ uint32_t ari_core_debug_recovery(uint32_t ari_base, uint32_t core_id,
- uint32_t ari_dsu_debug_recovery(uint32_t ari_base, uint32_t cluster_id,
- 	 bool cluster_warm_reset)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint32_t request, ret;
- 
- 	assert(cluster_id < PLATFORM_CLUSTER_COUNT);
-@@ -371,6 +387,7 @@ uint32_t ari_dsu_debug_recovery(uint32_t ari_base, uint32_t cluster_id,
-  */
- uint32_t ari_ccplex_latic_on(uint32_t ari_base)
- {
-+	INFO("Entering %s\n", __func__);
- 
- 	/* clean the previous response state */
- 	ari_clobber_response(ari_base);
-@@ -387,6 +404,7 @@ uint32_t ari_ccplex_latic_on(uint32_t ari_base)
-  */
- uint32_t ari_ccplex_cache_clean(uint32_t ari_base)
- {
-+	INFO("Entering %s\n", __func__);
- 	/* clean the previous response state */
- 	ari_clobber_response(ari_base);
- 
-@@ -401,6 +419,7 @@ uint32_t ari_ccplex_cache_clean(uint32_t ari_base)
-  */
- uint32_t ari_ccplex_cache_clean_and_invalidate(uint32_t ari_base)
- {
-+	INFO("Entering %s\n", __func__);
- 	/* clean the previous response state */
- 	ari_clobber_response(ari_base);
- 
-@@ -417,6 +436,7 @@ uint32_t ari_ccplex_cache_clean_and_invalidate(uint32_t ari_base)
-  */
- static void ari_ccplex_shutdown(uint32_t ari_base, uint32_t type)
- {
-+	INFO("Entering %s\n", __func__);
- 	/* sanity check for type */
- 	assert(type <= TEGRA_ARI_CCPLEX_SHUTDOWN_REBOOT);
- 
-@@ -451,6 +471,7 @@ static void ari_ccplex_shutdown(uint32_t ari_base, uint32_t type)
- uint32_t ari_update_cstate_info(uint32_t ari_base, uint32_t cluster,
- 	 uint32_t system, uint32_t wake_mask, uint8_t update_wake_mask)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint32_t val = 0;
- 
- 	/* update CLUSTER_CSTATE? */
-@@ -486,6 +507,7 @@ uint32_t ari_update_cstate_info(uint32_t ari_base, uint32_t cluster,
-  */
- bool ari_is_sc7_allowed(uint32_t ari_base)
- {
-+	INFO("Entering %s\n", __func__);
- 	bool result;
- 	uint32_t ret;
- 
-@@ -514,14 +536,32 @@ bool ari_is_sc7_allowed(uint32_t ari_base)
-  */
++#define ARI_ONLINE_CORE_MAX_RETRY_COUNT   U(20000000)  /* 20 seconds */
++
  uint32_t ari_online_core(uint32_t ari_base, uint32_t core)
  {
 -	assert(core <
@@ -3422,326 +513,79 @@ index f9f71a3..f30c621 100644
 -
 -	/* get a core online */
 -	return ari_request_wait(ari_base, 0U, TEGRA_ARI_ONLINE_CORE, core, 0U);
-+    uint32_t status;
-+    uint32_t retries = ARI_MAX_RETRY_COUNT;
++    INFO("Entering %s\n", __func__);
++    uint32_t status = ari_read_32(ari_base, ARI_STATUS);
 +
-+    /* Wait for any in-progress ARI to complete before issuing ONLINE_CORE.
-+     * A stale CCPMU RAS interrupt may have triggered MCE_CMD_ENTER_CSTATE
-+     * on this aperture, leaving the mailbox busy. */
-+    do {
-+        status = ari_read_32(ari_base, ARI_STATUS);
-+        if ((status & (ARI_REQ_PENDING | ARI_REQ_ONGOING)) == 0U) {
-+            break;
-+        }
-+        udelay(1);
-+    } while (--retries != 0U);
-+
-+    if (retries == 0U) {
-+        ERROR("ARI mailbox still busy before ONLINE_CORE: status=0x%x\n", status);
-+        return ARI_REQ_EXECUTION_ERROR;
++    if (status != 0U) {
++        WARN("ARI: mailbox status=0x%x before ONLINE_CORE\n", status);
++        ari_write_32(ari_base, 0U, ARI_REQUEST);
++        ari_write_32(ari_base, 0U, ARI_RESPONSE_DATA_LO);
++        ari_write_32(ari_base, 0U, ARI_RESPONSE_DATA_HI);
++        dsbsy();
++        isb();
++        udelay(100);
 +    }
 +
-+    WARN("ARI: issuing req=%u on core=%u, mailbox_status=0x%x\n",
++    WARN("ARI: issuing req=%u on core=%u, status=0x%x\n",
 +        (uint32_t)TEGRA_ARI_ONLINE_CORE, plat_my_core_pos(),
 +        ari_read_32(ari_base, ARI_STATUS));
 +
 +    assert(core < (PLATFORM_CLUSTER_COUNT * PLATFORM_MAX_CPUS_PER_CLUSTER));
 +    ari_clobber_response(ari_base);
-+    return ari_request_wait(ari_base, 0U, TEGRA_ARI_ONLINE_CORE, core, 0U);
++
++    /* Use extended retry count for ONLINE_CORE */
++    uint32_t retries = ARI_ONLINE_CORE_MAX_RETRY_COUNT;
++    uint32_t ret = 0U;
++    uint32_t s;
++
++    ari_write_32(ari_base, 0, ARI_RESPONSE_DATA_LO);
++    ari_write_32(ari_base, 0, ARI_RESPONSE_DATA_HI);
++    ari_request_send_command(ari_base, 0U,
++                             (uint32_t)TEGRA_ARI_ONLINE_CORE, core, 0U);
++
++    while (retries != 0U) {
++        s = ari_read_32(ari_base, ARI_STATUS);
++        if ((s & (ARI_REQ_ONGOING | ARI_REQ_PENDING |
++                  ARI_REQ_STATUS_MASK)) == 0U) {
++            break;
++        }
++        if ((s & ARI_REQ_STATUS_MASK) != 0U) {
++            ret = ((s & ARI_REQ_STATUS_MASK) >> 2);
++            ERROR("ARI ONLINE_CORE error: 0x%x\n", ret);
++            return ret;
++        }
++        udelay(1);
++        retries--;
++    }
++
++    if (retries == 0U) {
++        ERROR("ARI ONLINE_CORE timed out: status=0x%x\n",
++              ari_read_32(ari_base, ARI_STATUS));
++        ari_write_32(ari_base,
++                     ARI_REQUEST_VALID_BIT | ARI_REQUEST_KILL_BIT,
++                     ARI_REQUEST);
++        dsbsy();
++        isb();
++        udelay(500);
++        tegra234_ras_clear_ccpmu_registers();
++        gicv3_clear_interrupt_pending(TEGRA234_RAS_PPI_ERI,
++                                      plat_my_core_pos());
++        gicv3_clear_interrupt_pending(TEGRA234_RAS_PPI_FHI,
++                                      plat_my_core_pos());
++        dsbsy();
++        isb();
++        ari_write_32(ari_base, 0U, ARI_REQUEST);
++        dsbsy();
++        isb();
++        return ARI_REQ_EXECUTION_ERROR;
++    }
++
++    return 0U;
  }
  
  /*
-@@ -534,6 +574,7 @@ uint32_t ari_online_core(uint32_t ari_base, uint32_t core)
-  */
- int32_t ari_update_ccplex_gsc(uint32_t ari_base, uint32_t gsc_idx)
- {
-+	INFO("Entering %s\n", __func__);
- 	/* sanity check GSC ID */
- 	if (gsc_idx != TEGRA_ARI_CARVEOUT_VPR) {
- 		return -EINVAL;
-@@ -563,6 +604,7 @@ int32_t ari_update_ccplex_gsc(uint32_t ari_base, uint32_t gsc_idx)
-  */
- uint32_t ari_enter_cstate(uint32_t ari_base, uint32_t wake_time)
- {
-+	INFO("Entering %s\n", __func__);
- /*
-  * should have C1 state according CCPLEX_Power_Management_GFD
-  * but only wake_time as input parameter in MCE_ISS.
-@@ -587,6 +629,7 @@ uint32_t ari_enter_cstate(uint32_t ari_base, uint32_t wake_time)
-  */
- void ari_enable_strict_checking_mode(uint32_t ari_base)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint32_t params;
- 	uint32_t ret = 0U;
- 
-@@ -622,6 +665,7 @@ void ari_enable_strict_checking_mode(uint32_t ari_base)
-  */
- uint64_t ari_gic_sync_control(uint32_t ari_base, uint32_t ctrl_val)
- {
-+	INFO("Entering %s\n", __func__);
- 	int32_t ret32;
- 	uint64_t ret64;
- 
-@@ -649,6 +693,7 @@ uint64_t ari_gic_sync_control(uint32_t ari_base, uint32_t ctrl_val)
-  */
- void ari_system_reboot(uint32_t ari_base)
- {
-+	INFO("Entering %s\n", __func__);
- 	ari_ccplex_shutdown(ari_base, TEGRA_ARI_CCPLEX_SHUTDOWN_REBOOT);
- }
- 
-@@ -657,5 +702,6 @@ void ari_system_reboot(uint32_t ari_base)
-  */
- void ari_system_shutdown(uint32_t ari_base)
- {
-+	INFO("Entering %s\n", __func__);
- 	ari_ccplex_shutdown(ari_base, TEGRA_ARI_CCPLEX_SHUTDOWN_POWER_OFF);
- }
-diff --git a/plat/nvidia/tegra/soc/t234/drivers/mce/mce.c b/plat/nvidia/tegra/soc/t234/drivers/mce/mce.c
-index 7e1ba95..ec700a2 100644
---- a/plat/nvidia/tegra/soc/t234/drivers/mce/mce.c
-+++ b/plat/nvidia/tegra/soc/t234/drivers/mce/mce.c
-@@ -60,6 +60,7 @@ static uint32_t mce_cfg_table[PLATFORM_CLUSTER_COUNT][PLATFORM_MAX_CPUS_PER_CLUS
- 
- static uint32_t mce_get_curr_cpu_ari_base(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	u_register_t mpidr = read_mpidr();
- 	u_register_t cpu_id, cluster_id;
- 
-@@ -79,6 +80,7 @@ static uint32_t mce_get_curr_cpu_ari_base(void)
- /* Handler to check if MCE firmware is supported */
- static bool mce_firmware_not_supported(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	/* Check if this platform is supported */
- 	if (tegra_unsupported_platform_bitmap != U(0xDEADBEEF)) {
- 		return !(tegra_unsupported_platform_bitmap == 0U);
-@@ -101,6 +103,7 @@ static bool mce_firmware_not_supported(void)
- int32_t mce_command_handler(uint64_t cmd, uint64_t arg0, uint64_t arg1,
- 			uint64_t arg2)
- {
-+	INFO("Entering %s\n", __func__);
- 	int32_t ret = 0;
- 	uint32_t cpu_ari_base;
- 
-@@ -180,6 +183,7 @@ int32_t mce_command_handler(uint64_t cmd, uint64_t arg0, uint64_t arg1,
-  *****************************************************************************/
- int32_t mce_update_gsc_videomem(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	int32_t ret = 0;
- 
- 	/*
-@@ -200,6 +204,7 @@ int32_t mce_update_gsc_videomem(void)
-  *****************************************************************************/
- int32_t mce_update_gsc_tzdram(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	/* This function is not required for T23x.
- 	 * Return 0 to avoid compile error.
- 	 */
-@@ -211,6 +216,7 @@ int32_t mce_update_gsc_tzdram(void)
-  *****************************************************************************/
- void mce_update_cstate_info(const mce_cstate_info_t *cstate)
- {
-+	INFO("Entering %s\n", __func__);
- 	/* issue the UPDATE_CSTATE_INFO request */
- 	ari_update_cstate_info(mce_get_curr_cpu_ari_base(), cstate->cluster,
- 		 cstate->system, cstate->wake_mask, cstate->update_wake_mask);
-@@ -222,6 +228,7 @@ void mce_update_cstate_info(const mce_cstate_info_t *cstate)
-  *****************************************************************************/
- void mce_verify_firmware_version(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint64_t version;
- 	uint32_t major, minor;
- 
-@@ -263,6 +270,7 @@ void mce_verify_firmware_version(void)
-  *****************************************************************************/
- void mce_clean_and_invalidate_caches(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	int32_t ret = 0;
- 
- 	/*
-@@ -285,6 +293,7 @@ void mce_clean_and_invalidate_caches(void)
-  *****************************************************************************/
- void mce_enable_strict_checking(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint64_t sctlr = read_sctlr_el3();
- 	int32_t ret = 0;
- 
-@@ -341,6 +350,7 @@ void mce_enable_strict_checking(void)
-  */
- uint32_t mce_enter_debug_recovery_mode(uint32_t core_id)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint32_t ret;
- 	uint32_t ari_base = mce_get_curr_cpu_ari_base();
- 
-@@ -363,6 +373,7 @@ uint32_t mce_enter_debug_recovery_mode(uint32_t core_id)
-  *****************************************************************************/
- void mce_system_shutdown(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	ari_system_shutdown(mce_get_curr_cpu_ari_base());
- }
- 
-@@ -371,6 +382,7 @@ void mce_system_shutdown(void)
-  *****************************************************************************/
- void mce_system_reboot(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	ari_system_reboot(mce_get_curr_cpu_ari_base());
- }
- 
-@@ -379,6 +391,7 @@ void mce_system_reboot(void)
-  *****************************************************************************/
- uint32_t mce_num_cores(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint32_t num_cores = 1U;
- 
- 	if (mce_firmware_not_supported()) {
-@@ -406,6 +419,7 @@ uint32_t mce_num_cores(void)
-  *****************************************************************************/
- bool mce_is_cluster_present(unsigned int id)
- {
-+	INFO("Entering %s\n", __func__);
- 	unsigned int mode;
- 
- 	/* Sanity check cluster id */
-@@ -440,6 +454,7 @@ bool mce_is_cluster_present(unsigned int id)
-  *****************************************************************************/
- bool mce_is_cluster_in_lock_mode(unsigned int id)
- {
-+	INFO("Entering %s\n", __func__);
- 	unsigned int mode;
- 
- 	/* Sanity checks */
-@@ -463,6 +478,7 @@ bool mce_is_cluster_in_lock_mode(unsigned int id)
-  *****************************************************************************/
- bool mce_is_cluster_in_split_mode(unsigned int id)
- {
-+	INFO("Entering %s\n", __func__);
- 	unsigned int mode;
- 
- 	/* Sanity checks */
-@@ -486,6 +502,7 @@ bool mce_is_cluster_in_split_mode(unsigned int id)
-  *****************************************************************************/
- bool mce_is_cluster_in_hybrid_mode(unsigned int id)
- {
-+	INFO("Entering %s\n", __func__);
- 	unsigned int mode;
- 
- 	/* Sanity checks */
-@@ -509,6 +526,7 @@ bool mce_is_cluster_in_hybrid_mode(unsigned int id)
-  *****************************************************************************/
- void mce_enable_gic_sync_control(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint32_t base = mce_get_curr_cpu_ari_base();
- 	uint64_t ret;
- 
-@@ -530,6 +548,7 @@ void mce_enable_gic_sync_control(void)
-  *****************************************************************************/
- void mce_disable_gic_sync_control(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint32_t base = mce_get_curr_cpu_ari_base();
- 	uint64_t ret;
- 
-diff --git a/plat/nvidia/tegra/soc/t234/drivers/se/se.c b/plat/nvidia/tegra/soc/t234/drivers/se/se.c
-index 74caa6d..03db4e0 100644
---- a/plat/nvidia/tegra/soc/t234/drivers/se/se.c
-+++ b/plat/nvidia/tegra/soc/t234/drivers/se/se.c
-@@ -34,6 +34,7 @@
-  */
- static bool tegra_se_is_operation_complete(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint32_t val = 0U, timeout = 0U;
- 	int32_t ret = 0;
- 	bool se_is_busy = false;
-@@ -78,6 +79,7 @@ static bool tegra_se_is_operation_complete(void)
-  */
- static bool tegra_se_is_ready(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	int32_t ret = 0;
- 	uint32_t val = 0, timeout = 0;
- 	bool se_is_ready = false;
-@@ -107,6 +109,7 @@ static bool tegra_se_is_ready(void)
-  */
- static void tegra_se_softreset(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint32_t val = SE0_SOFTRESET_TRUE, timeout = 0U;
- 
- 	/* trigger SE0 softreset */
-@@ -130,6 +133,7 @@ static void tegra_se_softreset(void)
- /* Function to perform the context save/restore sequence */
- static int32_t tegra_se_program_ctx_ops(uint32_t ctx_op)
- {
-+	INFO("Entering %s\n", __func__);
- 	int32_t ret = -ECANCELED;
- 	uint32_t se_int_state, val;
- 
-@@ -192,11 +196,13 @@ static int32_t tegra_se_program_ctx_ops(uint32_t ctx_op)
- 
- static int32_t tegra_se_save_context(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	return tegra_se_program_ctx_ops(SE_CTX_SAVE);
- }
- 
- static int32_t tegra_se_restore_context(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	return tegra_se_program_ctx_ops(SE_CTX_RESTORE);
- }
- 
-@@ -206,6 +212,7 @@ static int32_t tegra_se_restore_context(void)
-  */
- int32_t tegra_se_suspend(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	int32_t ret = 0;
- 
- 	/* initialise communication channel with BPMP */
-@@ -231,6 +238,7 @@ int32_t tegra_se_suspend(void)
-  */
- void tegra_se_resume(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	int32_t ret = 0;
- 
- 	/* initialise communication channel with BPMP */
-diff --git a/plat/nvidia/tegra/soc/t234/plat_errata.c b/plat/nvidia/tegra/soc/t234/plat_errata.c
-index 798caf6..8e32d88 100644
---- a/plat/nvidia/tegra/soc/t234/plat_errata.c
-+++ b/plat/nvidia/tegra/soc/t234/plat_errata.c
-@@ -23,6 +23,7 @@ extern uint64_t cpu_get_rev_var(void);
- 
- void tegra234_enable_errata_2821985_wa(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint32_t pmc_misc_val;
- 	uint64_t val;
- 
-@@ -46,6 +47,7 @@ void tegra234_enable_errata_2821985_wa(void)
- 
- void tegra234_report_errata()
- {
-+	INFO("Entering %s\n", __func__);
- 	uint64_t val;
- 
- 	val = cpu_get_rev_var();
 diff --git a/plat/nvidia/tegra/soc/t234/plat_memctrl.c b/plat/nvidia/tegra/soc/t234/plat_memctrl.c
-index 78c66a9..9cee3de 100644
+index 78c66a9..9742022 100644
 --- a/plat/nvidia/tegra/soc/t234/plat_memctrl.c
 +++ b/plat/nvidia/tegra/soc/t234/plat_memctrl.c
 @@ -4,6 +4,7 @@
@@ -3752,32 +596,8 @@ index 78c66a9..9cee3de 100644
  #include <assert.h>
  #include <common/bl_common.h>
  #include <mce.h>
-@@ -16,6 +17,7 @@
-  ******************************************************************************/
- void plat_memctrl_restore(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	; /* do nothing */
- }
- 
-@@ -24,6 +26,7 @@ void plat_memctrl_restore(void)
-  ******************************************************************************/
- void plat_memctrl_setup(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	; /* do nothing */
- }
- 
-@@ -33,6 +36,7 @@ void plat_memctrl_setup(void)
-  ******************************************************************************/
- void plat_memctrl_tzdram_setup(uint64_t phys_base, uint64_t size_in_bytes)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint32_t sec_reg_ctrl = tegra_mc_read_32(MC_SECURITY_CFG_REG_CTRL_0);
- 	uint32_t phys_base_lo = (uint32_t)phys_base & 0xFFF00000;
- 	uint32_t phys_base_hi = (uint32_t)(phys_base >> 32);
 diff --git a/plat/nvidia/tegra/soc/t234/plat_psci_handlers.c b/plat/nvidia/tegra/soc/t234/plat_psci_handlers.c
-index 5e4e480..fd0ad52 100644
+index 5e4e480..2a84c8c 100644
 --- a/plat/nvidia/tegra/soc/t234/plat_psci_handlers.c
 +++ b/plat/nvidia/tegra/soc/t234/plat_psci_handlers.c
 @@ -29,6 +29,7 @@
@@ -3788,93 +608,26 @@ index 5e4e480..fd0ad52 100644
  
  /* state id mask */
  #define TEGRA234_STATE_ID_MASK		0xFU
-@@ -52,6 +53,7 @@ static struct t234_psci_percpu_data {
- int32_t tegra_soc_validate_power_state(uint32_t power_state,
- 					psci_power_state_t *req_state)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint8_t state_id = (uint8_t)psci_get_pstate_id(power_state) & TEGRA234_STATE_ID_MASK;
- 	uint32_t cpu = plat_my_core_pos();
- 	int32_t ret = PSCI_E_SUCCESS;
-@@ -91,6 +93,7 @@ int32_t tegra_soc_validate_power_state(uint32_t power_state,
- 
- int32_t tegra_soc_cpu_standby(plat_local_state_t cpu_state)
- {
-+	INFO("Entering %s\n", __func__);
- 	(void)cpu_state;
- 
- 	return PSCI_E_SUCCESS;
-@@ -98,6 +101,7 @@ int32_t tegra_soc_cpu_standby(plat_local_state_t cpu_state)
- 
- int32_t tegra_soc_pwr_domain_suspend(const psci_power_state_t *target_state)
- {
-+	INFO("Entering %s\n", __func__);
- 	const plat_local_state_t *pwr_domain_state;
- 	uint8_t stateid_afflvl0, stateid_afflvl2;
- 	uint32_t val;
-@@ -162,6 +166,7 @@ int32_t tegra_soc_pwr_domain_suspend(const psci_power_state_t *target_state)
- static bool tegra_last_on_cpu_in_cluster(const plat_local_state_t *states,
- 			uint32_t ncpu)
- {
-+	INFO("Entering %s\n", __func__);
- 	plat_local_state_t target;
- 	bool last_on_cpu = true;
- 	uint32_t num_cpus = ncpu, pos = 0;
-@@ -184,6 +189,7 @@ static bool tegra_last_on_cpu_in_cluster(const plat_local_state_t *states,
- static plat_local_state_t tegra_get_afflvl1_pwr_state(const plat_local_state_t *states,
- 			uint32_t ncpu)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint32_t core_pos = plat_my_core_pos() % PLATFORM_MAX_CPUS_PER_CLUSTER;
- 	plat_local_state_t target = states[core_pos];
- 	mce_cstate_info_t cstate_info = { 0 };
-@@ -228,6 +234,7 @@ plat_local_state_t tegra_soc_get_target_pwr_state(uint32_t lvl,
- 					     const plat_local_state_t *states,
- 					     uint32_t ncpu)
- {
-+	INFO("Entering %s\n", __func__);
- 	plat_local_state_t target = PSCI_LOCAL_STATE_RUN;
- 	uint32_t cpu = plat_my_core_pos();
- 
-@@ -247,11 +254,13 @@ plat_local_state_t tegra_soc_get_target_pwr_state(uint32_t lvl,
- 
- int32_t tegra_soc_pwr_domain_suspend_pwrdown_early(const psci_power_state_t *target_state)
- {
-+	INFO("Entering %s\n", __func__);
- 	return PSCI_E_NOT_SUPPORTED;
- }
- 
- int32_t tegra_soc_pwr_domain_power_down_wfi(const psci_power_state_t *target_state)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint32_t rmr_el3;
- 	uint8_t stateid_afflvl2;
- 	uint32_t val;
-@@ -305,6 +314,7 @@ int32_t tegra_soc_pwr_domain_power_down_wfi(const psci_power_state_t *target_sta
+@@ -305,6 +306,18 @@ int32_t tegra_soc_pwr_domain_power_down_wfi(const psci_power_state_t *target_sta
  
  int32_t tegra_soc_pwr_domain_on(u_register_t mpidr)
  {
-+	INFO("Entering %s\n", __func__);
++	 uint32_t cluster_id = MPIDR_AFFLVL2_VAL(mpidr);
++    uint32_t core_id    = MPIDR_AFFLVL1_VAL(mpidr);
++
++    WARN("PSCI CPU_ON: mpidr=0x%lx cluster=%u core=%u present=%d\n",
++         mpidr, cluster_id, core_id,
++         mce_is_cluster_present(cluster_id));
++
++    if (!mce_is_cluster_present(cluster_id)) {
++        ERROR("PSCI CPU_ON: cluster %u not present — rejecting\n",
++              cluster_id);
++        return PSCI_E_NOT_PRESENT;
++    }
  	uint64_t target_cpu = plat_core_pos_by_mpidr(mpidr);
  
  	if (target_cpu >= PLATFORM_CORE_COUNT) {
-@@ -322,6 +332,7 @@ int32_t tegra_soc_pwr_domain_on(u_register_t mpidr)
-  ******************************************************************************/
- static void tegra_enable_cluster_pmu_writes(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint64_t actlr_elx;
- 
- 	/**
-@@ -339,6 +350,7 @@ static void tegra_enable_cluster_pmu_writes(void)
- 
- int32_t tegra_soc_pwr_domain_on_finish(const psci_power_state_t *target_state)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint8_t stateid_afflvl2 = target_state->pwr_domain_state[PLAT_MAX_PWR_LVL];
- 	uint8_t stateid_afflvl0 = target_state->pwr_domain_state[MPIDR_AFFLVL0];
- 	mce_cstate_info_t cstate_info = { 0 };
-@@ -349,6 +361,13 @@ int32_t tegra_soc_pwr_domain_on_finish(const psci_power_state_t *target_state)
+@@ -349,6 +362,13 @@ int32_t tegra_soc_pwr_domain_on_finish(const psci_power_state_t *target_state)
  	uint32_t cpu = plat_my_core_pos();
  
  #if RAS_EXTENSION
@@ -3888,59 +641,20 @@ index 5e4e480..fd0ad52 100644
  	/* Enable RAS handling for the cluster specific nodes */
  	tegra234_ras_init_my_cluster();
  #endif
-@@ -437,6 +456,7 @@ int32_t tegra_soc_pwr_domain_on_finish(const psci_power_state_t *target_state)
- 
- int32_t tegra_soc_pwr_domain_off(const psci_power_state_t *target_state)
- {
-+	INFO("Entering %s\n", __func__);
- 	(void)target_state;
- 
- 	/* Turn off CPU */
-@@ -448,6 +468,7 @@ int32_t tegra_soc_pwr_domain_off(const psci_power_state_t *target_state)
- 
- __dead2 void tegra_soc_prepare_system_off(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	/* Disable the GIC synchronization work-around */
- 	mce_disable_gic_sync_control();
- 
-@@ -464,6 +485,7 @@ __dead2 void tegra_soc_prepare_system_off(void)
- 
- int32_t tegra_soc_prepare_system_reset(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	/* Disable the GIC synchronization work-around */
- 	mce_disable_gic_sync_control();
- 
 diff --git a/plat/nvidia/tegra/soc/t234/plat_ras.c b/plat/nvidia/tegra/soc/t234/plat_ras.c
-index b092e35..fc7b17e 100644
+index b092e35..af05419 100644
 --- a/plat/nvidia/tegra/soc/t234/plat_ras.c
 +++ b/plat/nvidia/tegra/soc/t234/plat_ras.c
-@@ -14,6 +14,7 @@
+@@ -14,6 +14,8 @@
  #include <bl31/ea_handle.h>
  #include <common/debug.h>
  #include <drivers/arm/gic600ae_fmu.h>
++#include <drivers/arm/gicv3.h>
 +#include <drivers/delay_timer.h>
  #include <lib/bakery_lock.h>
  #include <lib/extensions/ras.h>
  #include <lib/extensions/ras_arch.h>
-@@ -145,6 +146,7 @@ REGISTER_ERR_RECORD_INFO(tegra234_ras_records_common);
- /* Check if IST is enabled for the platform */
- static bool is_ist_enabled(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint32_t val = mmio_read_32(TEGRA_SCRATCH_BASE + SCRATCH_IST_CLK_ENABLE);
- 	return ((val & BIT(0)) == 1U);
- }
-@@ -155,6 +157,7 @@ static bool is_ist_enabled(void)
-  */
- static bool is_err_record_supported(struct err_record_info *record)
- {
-+	INFO("Entering %s\n", __func__);
- 	const uintptr_t base_addr = record->memmap.base_addr;
- 	const struct ras_aux_data *aux_data =
- 		(const struct ras_aux_data *)record->aux_data;
-@@ -204,38 +207,65 @@ static bool is_err_record_supported(struct err_record_info *record)
+@@ -204,27 +206,52 @@ static bool is_err_record_supported(struct err_record_info *record)
  	return true;
  }
  
@@ -3962,7 +676,6 @@ index b092e35..fc7b17e 100644
 -      isb();
 -  }
 -}	
-+	INFO("Entering %s\n", __func__);
 +    uint64_t status = mmio_read_64(TEGRA234_RAS_CCPMU_BASE + ERR_STATUS(0));
 +    uint64_t w1c = 0ULL;
 +
@@ -4009,10 +722,9 @@ index b092e35..fc7b17e 100644
 -		        uint64_t status)
 +		        uint64_t status,uint64_t addr)
  {
-+	INFO("Entering %s\n", __func__);
    if (base != TEGRA234_RAS_CCPMU_BASE) {
       return false;
-   }
+@@ -232,10 +259,10 @@ static bool tegra234_ccpmu_is_mb2_boot_poison(uint32_t base,
    if (ERR_STATUS_GET_FIELD(status, UE) == 0U) {
       return false;
    }
@@ -4027,7 +739,7 @@ index b092e35..fc7b17e 100644
    return true;
  }	
  
-@@ -244,8 +274,10 @@ static bool tegra234_ccpmu_is_mb2_boot_poison(uint32_t base,
+@@ -244,7 +271,8 @@ static bool tegra234_ccpmu_is_mb2_boot_poison(uint32_t base,
   ******************************************************************************/
  /* Function to handle error from one given node */
  static int32_t tegra234_ras_node_handler(uint32_t base, const char *name,
@@ -4035,11 +747,9 @@ index b092e35..fc7b17e 100644
 +        const struct ras_error *errors, unsigned int num_errors,
 +        bool *out_was_mb2_poison)
  {
-+	INFO("Entering %s\n", __func__);
  	bool found = false;
  	int32_t ret = 0;
- 	uint64_t val = 0U;
-@@ -257,6 +289,8 @@ static int32_t tegra234_ras_node_handler(uint32_t base, const char *name,
+@@ -257,6 +285,8 @@ static int32_t tegra234_ras_node_handler(uint32_t base, const char *name,
  	uint64_t misc2 = mmio_read_64(base + ERR_MISC2(0));
  	uint64_t misc3 = mmio_read_64(base + ERR_MISC3(0));
  
@@ -4048,7 +758,7 @@ index b092e35..fc7b17e 100644
  	/*
  	 * repeat until we have ERR<n>STATUS value consistent with
  	 * the syndrome recorded for that error
-@@ -305,6 +339,12 @@ static int32_t tegra234_ras_node_handler(uint32_t base, const char *name,
+@@ -305,6 +335,12 @@ static int32_t tegra234_ras_node_handler(uint32_t base, const char *name,
  		serr = U(14);
  	}
  
@@ -4061,7 +771,7 @@ index b092e35..fc7b17e 100644
  	ERR_STATUS_SET_FIELD(val, V, 1);
  
  	ERROR("**************************************\n");
-@@ -345,11 +385,13 @@ static int32_t tegra234_ras_node_handler(uint32_t base, const char *name,
+@@ -345,11 +381,13 @@ static int32_t tegra234_ras_node_handler(uint32_t base, const char *name,
  
  		ret = -ENOTRECOVERABLE;
  		/* Suppress halt for the known MB2 stale CCPMU boot poison. */
@@ -4080,15 +790,7 @@ index b092e35..fc7b17e 100644
  		}
  	} else {
  		/* For corrected error, simply clear it. */
-@@ -393,6 +435,7 @@ static int32_t tegra234_ras_node_handler(uint32_t base, const char *name,
- static int32_t tegra234_ras_record_handler(const struct err_record_info *info,
- 		int probe_data, const struct err_handler_data *data __unused)
- {
-+	INFO("Entering %s\n", __func__);
- 	const struct ras_aux_data *aux_data = info->aux_data;
- 	uint32_t base = info->memmap.base_addr;
- 
-@@ -400,13 +443,15 @@ static int32_t tegra234_ras_record_handler(const struct err_record_info *info,
+@@ -400,7 +438,8 @@ static int32_t tegra234_ras_record_handler(const struct err_record_info *info,
  	assert(aux_data->error_records != NULL);
  
  	return tegra234_ras_node_handler(base, aux_data->name,
@@ -4098,30 +800,7 @@ index b092e35..fc7b17e 100644
  }
  
  /* Function to probe an error from error record group. */
- static int32_t tegra234_ras_record_probe(const struct err_record_info *info,
- 		int *probe_data)
- {
-+	INFO("Entering %s\n", __func__);
- 	return ser_probe_memmap(info->memmap.base_addr, info->memmap.size_num_k, probe_data);
- }
- 
-@@ -414,6 +459,7 @@ static int32_t tegra234_ras_record_probe(const struct err_record_info *info,
- static int32_t tegra234_gic_ras_record_handler(const struct err_record_info *info,
- 		int probe_data, const struct err_handler_data *data __unused)
- {
-+	INFO("Entering %s\n", __func__);
- 	return gic600_fmu_ras_handler(info->memmap.base_addr, probe_data);
- }
- 
-@@ -421,6 +467,7 @@ static int32_t tegra234_gic_ras_record_handler(const struct err_record_info *inf
- static int32_t tegra234_gic_ras_record_probe(const struct err_record_info *info,
- 		int *probe_data)
- {
-+	INFO("Entering %s\n", __func__);
- 	return gic600_fmu_probe(info->memmap.base_addr, probe_data);
- }
- 
-@@ -429,114 +476,94 @@ static int32_t tegra234_gic_ras_record_probe(const struct err_record_info *info,
+@@ -429,114 +468,94 @@ static int32_t tegra234_gic_ras_record_probe(const struct err_record_info *info,
   * no handler was found for the interrupt number, this function panics.
   */
  static int tegra234_ras_handler(uint32_t intr_raw, uint32_t flags,
@@ -4323,68 +1002,117 @@ index b092e35..fc7b17e 100644
  }
  
  /*******************************************************************************
-@@ -546,6 +573,7 @@ static int tegra234_ras_handler(uint32_t intr_raw, uint32_t flags,
- void plat_ea_handler(unsigned int ea_reason, uint64_t syndrome, void *cookie,
- 		void *handle, uint64_t flags)
- {
-+	INFO("Entering %s\n", __func__);
- 	ERROR("Exception reason=%u syndrome=0x%" PRIx64 "\n", ea_reason, syndrome);
- 
- #if RAS_EXTENSION
-@@ -563,6 +591,7 @@ void plat_ea_handler(unsigned int ea_reason, uint64_t syndrome, void *cookie,
-  ******************************************************************************/
- void plat_handle_el3_ea(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint64_t syndrome = read_esr_el3();
- 	uint32_t flags = read_scr_el3() & SCR_NS_BIT;
- 
-@@ -580,6 +609,7 @@ void plat_handle_el3_ea(void)
- static void enable_error_detection_for_group(struct err_record_info *group,
- 		uint32_t num_of_entries)
- {
-+	INFO("Entering %s\n", __func__);
- 	struct err_record_info *info;
- 
- 	for (info = group; num_of_entries > 0; num_of_entries--, info++) {
-@@ -657,6 +687,7 @@ static void enable_error_detection_for_group(struct err_record_info *group,
-  */
- void tegra234_ras_init_common(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint32_t i;
- 
- 	/* RAS is only supported by limited platforms */
-@@ -696,6 +727,7 @@ typedef struct err_record_desc {
+@@ -696,35 +715,79 @@ typedef struct err_record_desc {
   */
  void tegra234_ras_init_my_cluster(void)
  {
-+	INFO("Entering %s\n", __func__);
- 	int id = MPIDR_AFFLVL2_VAL(read_mpidr());
- 	err_record_desc_t list[] = {
- 		{
-@@ -736,6 +768,7 @@ void tegra234_ras_init_my_cluster(void)
+-	int id = MPIDR_AFFLVL2_VAL(read_mpidr());
+-	err_record_desc_t list[] = {
+-		{
+-			.record = tegra234_ras_records_cluster0,
+-			.num_entries = ARRAY_SIZE(tegra234_ras_records_cluster0)
+-		},
+-		{
+-			.record = tegra234_ras_records_cluster1,
+-			.num_entries = ARRAY_SIZE(tegra234_ras_records_cluster1)
+-		},
+-		{
+-			.record = tegra234_ras_records_cluster2,
+-			.num_entries = ARRAY_SIZE(tegra234_ras_records_cluster2)
+-		}
+-	};
+-
+-	assert(id < ARRAY_SIZE(list));
+-
+-	/* RAS is only supported by limited platforms */
+-	if (!tegra_platform_is_fpga() && !tegra_platform_is_silicon()) {
+-		return;
+-	}
+-
+-	/* Enable RAS error detection and reporting for the cluster */
+-	if (mce_is_cluster_present(id)) {
+-		enable_error_detection_for_group(list[id].record, list[id].num_entries);
+-	}
+-
+-	VERBOSE("RAS handling enabled for cluster%d\n", id);
++    int id = MPIDR_AFFLVL2_VAL(read_mpidr());
++    err_record_desc_t list[] = {
++        {
++            .record = tegra234_ras_records_cluster0,
++            .num_entries = ARRAY_SIZE(tegra234_ras_records_cluster0)
++        },
++        {
++            .record = tegra234_ras_records_cluster1,
++            .num_entries = ARRAY_SIZE(tegra234_ras_records_cluster1)
++        },
++        {
++            .record = tegra234_ras_records_cluster2,
++            .num_entries = ARRAY_SIZE(tegra234_ras_records_cluster2)
++        }
++    };
++
++    assert(id < ARRAY_SIZE(list));
++
++    if (!tegra_platform_is_fpga() && !tegra_platform_is_silicon()) {
++        return;
++    }
++
++    if (mce_is_cluster_present(id)) {
++        enable_error_detection_for_group(list[id].record,
++                                         list[id].num_entries);
++    }
++
++    /*
++     * Tegra234 workaround: enable_error_detection_for_group() just
++     * wrote ERR_CTLR.UI=1 for the cluster RAS nodes. If any CCPMU
++     * error was latched between our earlier tegra234_ras_clear_ccpmu_registers()
++     * call and this point (e.g. from an MC reconfiguration during
++     * Xen EFI loading), the RAS node immediately asserts its interrupt
++     * wire and the GIC redistributor latches it as pending.
++     *
++     * Fix sequence (order is critical per ARM IHI0069 GICv3 spec):
++     *
++     * Step 1: Clear the interrupt source — write W1C to CCPMU ERR_STATUS
++     *         to deassert the interrupt wire at the RAS node.
++     *         Also zero MISC0/MISC1 per DDI0587D §4.3.5 to ensure the
++     *         node returns to quiescent state.
++     * Step 2: DSB+ISB — ensure the RAS node write completes before
++     *         we touch the GIC.
++     * Step 3: Clear GIC pending state — use gicv3_clear_interrupt_pending()
++     *         to write GICR_ICPENDR0 W1C for both RAS PPIs at this PE's
++     *         redistributor. This removes any pending state that latched
++     *         between the ERR_CTLR write and Step 1.
++     * Step 4: DSB — ensure the GIC write completes.
++     * Step 5: Mask IH sources — prevents future spurious assertions
++     *         until Xen/Dom0 SDEI registration unmasks them.
++     *
++     * Note: gicv3_clear_interrupt_pending() is safe to call here
++     * because tegra_gic_pcpu_init() has already been called for this
++     * CPU earlier in tegra_pwr_domain_on_finish(), so this PE's
++     * redistributor is awake and accessible.
++     */
++    tegra234_ras_clear_ccpmu_registers();
++    dsbsy();
++    isb();
++
++    {
++        unsigned int this_core = plat_my_core_pos();
++
++        gicv3_clear_interrupt_pending(TEGRA234_RAS_PPI_ERI, this_core);
++        gicv3_clear_interrupt_pending(TEGRA234_RAS_PPI_FHI, this_core);
++        dsbsy();
++
++        ih_write_ras_general_mask(this_core, ENB_ALL_INTR_SOURCES);
++        dsbsy();
++        isb();
++    }
++
++    VERBOSE("RAS handling enabled for cluster%d, GIC pending cleared\n", id);
+ }
  
- int tegra234_ras_inject_fault(uint64_t base, uint64_t pfgcdn, uint64_t pfgctl)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint64_t errctlr, val;
- 
- 	if ((base < TEGRA234_RAS_CCPMU_BASE) ||
-diff --git a/plat/nvidia/tegra/soc/t234/plat_secondary.c b/plat/nvidia/tegra/soc/t234/plat_secondary.c
-index 2022bce..e257ef7 100644
---- a/plat/nvidia/tegra/soc/t234/plat_secondary.c
-+++ b/plat/nvidia/tegra/soc/t234/plat_secondary.c
-@@ -15,6 +15,7 @@
-  ******************************************************************************/
- void plat_secondary_setup(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint64_t reset_addr = (uint64_t)tegra_secure_entrypoint;
- 
- 	INFO("Setting up secondary CPU boot\n");
+ #if DEBUG
 diff --git a/plat/nvidia/tegra/soc/t234/plat_setup.c b/plat/nvidia/tegra/soc/t234/plat_setup.c
-index f074d54..60de5b1 100644
+index f074d54..a8e0754 100644
 --- a/plat/nvidia/tegra/soc/t234/plat_setup.c
 +++ b/plat/nvidia/tegra/soc/t234/plat_setup.c
 @@ -15,6 +15,8 @@
@@ -4396,43 +1124,8 @@ index f074d54..60de5b1 100644
  #include <drivers/arm/gic_common.h>
  #include <drivers/arm/gicv3.h>
  #include <drivers/arm/gic600ae_fmu.h>
-@@ -64,6 +66,7 @@ static const uint8_t tegra_power_domain_tree_desc[] = {
-  ******************************************************************************/
- const uint8_t *plat_get_power_domain_tree_desc(void)
+@@ -225,6 +227,42 @@ void plat_early_platform_setup(void)
  {
-+	INFO("Entering %s\n", __func__);
- 	return tegra_power_domain_tree_desc;
- }
- 
-@@ -145,6 +148,7 @@ static const mmap_region_t tegra_mmap[] = {
-  ******************************************************************************/
- const mmap_region_t *plat_get_mmio_map(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	/* MMIO space */
- 	return tegra_mmap;
- }
-@@ -154,6 +158,7 @@ const mmap_region_t *plat_get_mmio_map(void)
-  ******************************************************************************/
- uint32_t plat_get_syscnt_freq2(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	return 31250000;
- }
- 
-@@ -182,6 +187,7 @@ static uint32_t tegra234_uart_addresses[TEGRA234_MAX_UART_PORTS + 1] = {
-  ******************************************************************************/
- void plat_enable_console(int32_t id)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint32_t console_clock = 0U;
- 
- #if ENABLE_CONSOLE_SPE
-@@ -223,8 +229,45 @@ void plat_enable_console(int32_t id)
-  ******************************************************************************/
- void plat_early_platform_setup(void)
- {
-+	INFO("Entering %s\n", __func__);
  	uint32_t __unused val;
  
 +	{
@@ -4474,103 +1167,3 @@ index f074d54..60de5b1 100644
  	/* sanity check MCE firmware compatibility */
  	mce_verify_firmware_version();
  
-@@ -281,6 +324,7 @@ static const interrupt_prop_t tegra234_interrupt_props[] = {
-  ******************************************************************************/
- void plat_gic_setup(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	/* Tegra234 contains GICD, SPI Collator, Wake Request, PPI0-PPI2 blocks */
- 	uint64_t tegra234_gic600_fmu_blks = BIT(FMU_BLK_GICD) | BIT(FMU_BLK_SPICOL) |
- 			BIT(FMU_BLK_WAKERQ) | BIT(FMU_BLK_PPI0) | BIT(FMU_BLK_PPI1) |
-@@ -332,6 +376,7 @@ void plat_gic_setup(void)
-  ******************************************************************************/
- struct tegra_bl31_params *plat_get_bl31_params(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint32_t reg;
- 	uint64_t val;
- 
-@@ -349,6 +394,7 @@ struct tegra_bl31_params *plat_get_bl31_params(void)
-  ******************************************************************************/
- bl31_plat_params_t *plat_get_bl31_plat_params(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint32_t reg;
- 	uint64_t val;
- 
-@@ -366,6 +412,7 @@ bl31_plat_params_t *plat_get_bl31_plat_params(void)
-  ******************************************************************************/
- void plat_late_platform_setup(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint32_t ret;
- 	struct bpmp_ipc_platform_data *bpmp_ipc_data = plat_get_bpmp_ipc_data();
- 
-@@ -396,6 +443,7 @@ void plat_late_platform_setup(void)
-  ******************************************************************************/
- bool plat_supports_system_suspend(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	return true;
- }
- 
-@@ -405,6 +453,7 @@ bool plat_supports_system_suspend(void)
-  ******************************************************************************/
- bool plat_fiq_handler(uint32_t irq_num)
- {
-+	INFO("Entering %s\n", __func__);
- 	return false;
- }
- 
-@@ -414,6 +463,7 @@ bool plat_fiq_handler(uint32_t irq_num)
-  ******************************************************************************/
- void plat_verify_sysreg_settings(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint64_t mask, val;
- 
- 	/*
-@@ -508,6 +558,7 @@ void plat_verify_sysreg_settings(void)
-  ******************************************************************************/
- void plat_runtime_setup(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	/*
- 	 * During cold boot, it is observed that the arbitration
- 	 * bit is set in the Memory controller leading to false
-@@ -544,6 +595,7 @@ void plat_runtime_setup(void)
- static struct bpmp_ipc_platform_data bpmp_ipc;
- struct bpmp_ipc_platform_data *plat_get_bpmp_ipc_data(void)
- {
-+	INFO("Entering %s\n", __func__);
- 	uint64_t rx_end_addr;
- 	uint64_t sysram_end_addr;
- 
-@@ -585,6 +637,7 @@ struct bpmp_ipc_platform_data *plat_get_bpmp_ipc_data(void)
-  ******************************************************************************/
- int32_t tegra_soc_validate_ns_entrypoint(uintptr_t entrypoint)
- {
-+	INFO("Entering %s\n", __func__);
- 	int32_t ret = PSCI_E_INVALID_ADDRESS;
- 
- 	/*
-@@ -601,6 +654,7 @@ int32_t tegra_soc_validate_ns_entrypoint(uintptr_t entrypoint)
- int32_t plat_parse_bl31_plat_params(bl31_plat_params_t *plat_bl31_params,
- 				void *params_from_bl2)
- {
-+	INFO("Entering %s\n", __func__);
- 	t234_bl31_plat_params_t *plat_params =
- 				(t234_bl31_plat_params_t *)params_from_bl2;
- 
-diff --git a/plat/nvidia/tegra/soc/t234/plat_sip_calls.c b/plat/nvidia/tegra/soc/t234/plat_sip_calls.c
-index 0bb3779..047e376 100644
---- a/plat/nvidia/tegra/soc/t234/plat_sip_calls.c
-+++ b/plat/nvidia/tegra/soc/t234/plat_sip_calls.c
-@@ -48,6 +48,7 @@ int32_t plat_sip_handler(uint32_t smc_fid,
- 		     void *handle,
- 		     uint64_t flags)
- {
-+	INFO("Entering %s\n", __func__);
- 	int32_t ret = 0;
- 
- 	(void)x1;

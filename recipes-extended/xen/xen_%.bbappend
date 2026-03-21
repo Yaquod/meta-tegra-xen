@@ -9,6 +9,14 @@ SRC_URI += "file://0001-arm-Add-NVIDIA-Tegra234-platform-support.patch \
             file://0001-Clear-only-ERR_STATUS.V-from-Xen-never-touch-ERR_ADD.patch \
             "
 
+SYSTEMD_SERVICE:${PN}-tools-xencommons = " \
+    xenstored.service \
+    xenconsoled.service \
+    xen-init-dom0.service \
+"
+SYSTEMD_AUTO_ENABLE:${PN}-tools-xencommons = "enable"
+inherit systemd
+
 # Tegra-specific build flags
 EXTRA_OECONF += " \
     --enable-systemd \

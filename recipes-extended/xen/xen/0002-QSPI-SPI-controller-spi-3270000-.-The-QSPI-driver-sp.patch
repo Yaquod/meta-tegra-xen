@@ -1,0 +1,27 @@
+From e63ba20440b95c9fe84feb28a5277da25a1691b3 Mon Sep 17 00:00:00 2001
+From: AhmedAdelWafdy7 <fandes99@gmail.com>
+Date: Thu, 19 Mar 2026 11:03:15 +0000
+Subject: [PATCH] QSPI/SPI controller (spi@3270000). The QSPI driver
+ (spi_tegra210_quad) is trying to probe a SPI NOR flash chip, hitting a CBB
+ firewall because the QSPI controller clock/reset is gated by BPMP and the
+ IOMMU stream ID is not configured under Xen.
+
+---
+ xen/arch/arm/platforms/tegra234.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/xen/arch/arm/platforms/tegra234.c b/xen/arch/arm/platforms/tegra234.c
+index 92d492c6ac..16a197362b 100644
+--- a/xen/arch/arm/platforms/tegra234.c
++++ b/xen/arch/arm/platforms/tegra234.c
+@@ -191,8 +191,8 @@ static const struct dt_device_match tegra234_blacklist_dev[] __initconst =
+     DT_MATCH_COMPATIBLE("nvidia,tegra194-isp"),
+     DT_MATCH_COMPATIBLE("nvidia,tegra194-nvcsi"),
+ 
+-    DT_MATCH_COMPATIBLE("nvidia,tegra234-tcu"), 	/* Tegra Compined UART */
+-    DT_MATCH_COMPATIBLE("nvidia,tegra194-tcu"),
++    DT_MATCH_COMPATIBLE("nvidia,tegra210-qspi"),
++    DT_MATCH_COMPATIBLE("nvidia,tegra234-qspi"),
+ 
+     {/* sentinel */},
+ };

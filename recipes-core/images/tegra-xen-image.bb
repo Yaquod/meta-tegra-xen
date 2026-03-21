@@ -17,8 +17,11 @@ IMAGE_INSTALL = " \
     xen-tools-volatiles \
     xen-dtb-merge \
     xen-bootfiles \
+    kernel-module-r8168 \
+    tegra-net-config \
 "
 
+INIT_MANAGER = "systemd"
 IMAGE_ROOTFS_EXTRA_SPACE = "1048576"
 
 IMAGE_BOOT_FILES += " \
@@ -42,4 +45,21 @@ LABEL xen
     APPEND ${cbootargs} console=dtuart dtuart=/bus@0/serial@3100000 dom0_mem=2G dom0_max_vcpus=4 sched=credit2 loglvl=all guest_loglvl=all smmu=no iommu=no serrors=forward sync_console noreboot
 XENENTRY
     fi
+}
+
+enable_networkd() {
+    if [ ! -f ${IMAGE_ROOTFS}/usr/lib/systemd/systemd-networkd ]; then
+        bbwarn "systemd-networkd binary not found in rootfs"
+        return
+    fi
+
+    install -d ${IMAGE_ROOTFS}/etc/systemd/system/multi-user.target.wants
+    ln -sf /usr/lib/systemd/system/systemd-networkd.service \
+        ${IMAGE_ROOTFS}/etc/systemd/system/multi-user.target.wants/systemd-networkd.service
+
+    install -d ${IMAGE_ROOTFS}/etc/systemd/system/network-online.target.wants
+    ln -sf /usr/lib/systemd/system/systemd-networkd-wait-online.service \
+        ${IMAGE_ROOTFS}/etc/systemd/system/network-online.target.wants/systemd-networkd-wait-online.service
+
+    bbnote "systemd-networkd enabled in rootfs"
 }

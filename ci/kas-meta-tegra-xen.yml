@@ -46,7 +46,7 @@ repos:
 
 local_conf_header:
   meta-tegra-xen: |
-    # Parallelism
+    LAYERVERSION_meta-tegra-xen = "1"
     BB_NUMBER_THREADS ?= "$(nproc)"
     PARALLEL_MAKE ?= "-j $(nproc)"
 

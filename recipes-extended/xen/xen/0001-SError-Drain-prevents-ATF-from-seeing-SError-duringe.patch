@@ -1,0 +1,41 @@
+From 181688f46182c7a31ac1514af6e5770a3c12096c Mon Sep 17 00:00:00 2001
+From: Ahmed Wafdy <ahmedadelwafdy782@gmail.com>
+Date: Fri, 27 Feb 2026 14:53:08 +0000
+Subject: [PATCH] SError Drain :prevents ATF from seeing SError duringel3_exit
+ ERET with SCR_EL3.EA=1
+
+---
+ xen/arch/arm/efi/efi-boot.h | 20 ++++++++++++++++++++
+ 1 file changed, 20 insertions(+)
+
+diff --git a/xen/arch/arm/efi/efi-boot.h b/xen/arch/arm/efi/efi-boot.h
+index 1c3640bb65..b3d9fb1eff 100644
+--- a/xen/arch/arm/efi/efi-boot.h
++++ b/xen/arch/arm/efi/efi-boot.h
+@@ -391,6 +391,26 @@ static void __init efi_arch_process_memory_map(EFI_SYSTEM_TABLE *SystemTable,
+ 
+ static void __init efi_arch_pre_exit_boot(void)
+ {
++#ifdef CONFIG_ARM_64
++    /*
++     * Tegra234 workaround: consume pending SError before ExitBootServices.
++     * We must unmask SError briefly at EL2 to take any pending SError,
++     * then immediately re-mask. This prevents ATF from seeing it during
++     * el3_exit ERET with SCR_EL3.EA=1.
++     */
++    asm volatile(
++        "dsb sy\n\t"
++        "isb\n\t"
++        "msr daifclr, #4\n\t"
++        "isb\n\t"
++        "nop\n\t"
++        "nop\n\t"
++        "msr daifset, #4\n\t"
++        "isb\n\t"
++        "dsb sy\n\t"
++        ::: "memory"
++    );
++#endif
+ }
+ 
+ static void __init noreturn efi_arch_post_exit_boot(void)

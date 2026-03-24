@@ -1,0 +1,149 @@
+From d9e833111d5f424db33e6bd7a6985cb17831693a Mon Sep 17 00:00:00 2001
+From: Ahmed Wafdy <ahmedadelwafdy782@gmail.com>
+Date: Wed, 25 Feb 2026 10:24:24 +0000
+Subject: [PATCH] arm: Add NVIDIA Tegra234 platform support
+
+Signed-off-by: Ahmed Wafdy <ahmedadelwafdy782@gmail.com>
+---
+ xen/arch/arm/platforms/Makefile   |   1 +
+ xen/arch/arm/platforms/tegra234.c | 119 ++++++++++++++++++++++++++++++
+ 2 files changed, 120 insertions(+)
+ create mode 100644 xen/arch/arm/platforms/tegra234.c
+
+diff --git a/xen/arch/arm/platforms/Makefile b/xen/arch/arm/platforms/Makefile
+index 8632f4115f..abedb1e9db 100644
+--- a/xen/arch/arm/platforms/Makefile
++++ b/xen/arch/arm/platforms/Makefile
+@@ -6,6 +6,7 @@ obj-$(CONFIG_ALL32_PLAT) += omap5.o
+ obj-$(CONFIG_ALL32_PLAT) += rcar2.o
+ obj-$(CONFIG_ALL64_PLAT) += seattle.o
+ obj-$(CONFIG_ALL_PLAT)   += sunxi.o
++obj-$(CONFIG_ALL_PLAT)   += tegra234.o
+ obj-$(CONFIG_ALL64_PLAT) += thunderx.o
+ obj-$(CONFIG_ALL64_PLAT) += xgene-storm.o
+ obj-$(CONFIG_ALL64_PLAT) += brcm-raspberry-pi.o
+diff --git a/xen/arch/arm/platforms/tegra234.c b/xen/arch/arm/platforms/tegra234.c
+new file mode 100644
+index 0000000000..b265b2dde0
+--- /dev/null
++++ b/xen/arch/arm/platforms/tegra234.c
+@@ -0,0 +1,119 @@
++/*
++ * NVIDIA Tegra234 (Jetson Orin) platform support
++ *
++ * Copyright (C) 2026 Ahmed Wafdy ahmedadelwafdy782@gmail.com
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ */
++
++#include <xen/mm.h>
++#include <xen/vmap.h>
++#include <asm/platform.h>
++#include <asm/io.h>
++
++#define TEGRA234_UART_BASE	 0x03100000UL /* UART - physical hsuart */
++#define TEGRA234_UART_SIZE	 0x00010000UL
++
++#define TEGRA234_GICD_BASE	 0x0f400000UL
++#define TEGRA234_GICD_SIZE	 0x00010000UL /* 64KB */
++#define TEGRA234_GICR_BASE	 0x0f440000UL
++#define TEGRA234_GICR_SIZE	 0x00200000UL /* 2MB covers 6 redistributors */
++
++
++#define TEGRA234_SMMU_NISO0_BASE 0x08000000UL
++#define TEGRA234_SMMU_ISO_BASE   0x10000000UL
++#define TEGRA234_SMMU_NISO1_BASE 0x12000000UL
++#define TEGRA234_SMMU_SIZE	 0x08800000UL
++
++#define TEGRA234_BPMP_BASE	 0x0d000000UL
++#define TEGRA234_BPMP_SIZE	 0x00800000UL
++
++static int __init tegra234_init(void)
++{
++    printk(XENLOG_INFO
++	   "Xen: Initilaizing NVIDIA Tegra234 (Jetson Orin) Platform\n");
++    print(XENLOG_INFO 
++	  "Xen: UART @ 0x%08lx, GICD @ 0x%08lx, GICR @ 0x%08lx\n",
++  	  TEGRA234_UART_BASE, TEGRA234_GICD_BASE, TEGRA234_GICR_BASE);
++    return 0;
++}
++
++static int tegra234_specific_mapping(struct domain *d)
++{
++    int ret;
++
++    /* Map UART for Dom0 console */
++    ret = map_mmio_regions(d,
++		    	   gaddr_to_gfn(TEGRA234_UART_BASE),
++			   DIV_ROUND_UP(TEGRA234_UART_SIZE, PAGE_SIZE),
++			   maddr_to_mfn(TEGRA234_UART_BASE));
++
++    if(ret)
++    {
++	printk(XENLOG_ERR "Failed to map UART for Dom0\n");
++	return ret;
++    }
++
++    return 0;
++}
++
++/*
++ * Blacklist devices that should not be accessible to Dom0
++ * without explicit passthrough configrution
++ */
++static const struct dt_device_match tegra234_blacklist_dev[] __initconst =
++{
++    DT_MATCH_COMPATIBLE("nvidia,ga10b"),		/* Ampere GPU */
++
++    DT_MATCH_COMPATIBLE("nvidia,tegra234-dce"),		/* Display Engine */
++    DT_MATCH_COMPATIBLE("nvidia,tegra234-display"),
++    DT_MATCH_COMPATIBLE("nvidia,tegra234-display-niso"),
++
++    DT_MATCH_COMPATIBLE("nvidia,tegra234-nvenc"),	/* Hardware Video Encoders/Decoders */
++    DT_MATCH_COMPATIBLE("nvidia,tegra234-nvdec"),
++    DT_MATCH_COMPATIBLE("nvidia,tegra234-nvjpg"),
++
++    DT_MATCH_COMPATIBLE("nvidia,tegra234-pva"),		/* Vision and Optical Flow */
++    DT_MATCH_COMPATIBLE("nvidia,tegra234-ofa"),
++    DT_MATCH_COMPATIBLE("nvidia,tegra234-nvdla"),
++
++    DT_MATCH_COMPATIBLE("nvidia,tegra234-vi-thi"),	/* Camera/Video Input */
++    DT_MATCH_COMPATIBLE("nvidia,tegra194-vi"),
++    DT_MATCH_COMPATIBLE("nvidia,tegra194-isp"),
++    DT_MATCH_COMPATIBLE("nvidia,tegra194-nvcsi"),
++
++    DT_MATCH_COMPATIBLE("nvidia,tegra234-tcu"), 	/* Tegra Compined UART */
++    DT_MATCH_COMPATIBLE("nvidia,tegra194-tcu"),
++
++    {/* sentinel */},
++};
++
++static const char * const tegra234_dt_compat[] __initconst =
++{
++    "nvidia,p3768-0000+p3767-0000",  /* Orin Nano DevKit */
++    "nvidia,p3768-0000+p3767-0001",  /* Orin Nano */
++    "nvidia,p3768-0000+p3767-0003",  /* Orin NX 16GB */
++    "nvidia,p3768-0000+p3767-0004",  /* Orin NX 8GB */
++    "nvidia,p3768-0000+p3767-0005",  /* Orin Nano 4GB */
++    "nvidia,tegra234",
++    NULL
++};
++
++PLATFORM_START(tegra234, "NVIDIA Tegra234")
++    .compatible = tegra234_dt_compat
++    .init = tegra234_init,
++    .specific_mapping = tegra234_specific_mapping,
++    .blacklist_dev = tegra234_blacklist_dev,
++PLATFORM_END
++
++/*
++ * Local variables:
++ * mode: C
++ * c-file-style: "BSD"
++ * c-basic-offset: 4
++ * indent-tabs-mode: nil
++ * End:
++ */

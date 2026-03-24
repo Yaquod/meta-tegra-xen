@@ -1,0 +1,11 @@
+[Match]
+Name=enP8p1s0
+
+[Network]
+DHCP=ipv4
+LinkLocalAddressing=ipv4
+
+[DHCP]
+Timeout=60
+RouteMetric=10
+SendHostname=yes

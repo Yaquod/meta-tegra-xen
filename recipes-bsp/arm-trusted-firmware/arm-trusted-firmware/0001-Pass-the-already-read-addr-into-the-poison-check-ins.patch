@@ -1,0 +1,115 @@
+From 44a629294ccf9cc58f9f4b2d268cdab0ffea7b75 Mon Sep 17 00:00:00 2001
+From: Ahmed Wafdy <ahmedadelwafdy782@gmail.com>
+Date: Sun, 1 Mar 2026 00:42:17 +0000
+Subject: [PATCH] ATF armed RAS interrupts while a stale uncorrectable error
+ was already latched in CCPMU hardware, causing an immediate fatal interrupt
+ before any SDEI client could register.
+
+---
+ plat/nvidia/tegra/soc/t234/plat_ras.c   | 12 +++----
+ plat/nvidia/tegra/soc/t234/plat_setup.c | 48 +++++++++++++++++++++++--
+ 2 files changed, 52 insertions(+), 8 deletions(-)
+
+diff --git a/plat/nvidia/tegra/soc/t234/plat_ras.c b/plat/nvidia/tegra/soc/t234/plat_ras.c
+index b092e35..1306055 100644
+--- a/plat/nvidia/tegra/soc/t234/plat_ras.c
++++ b/plat/nvidia/tegra/soc/t234/plat_ras.c
+@@ -224,7 +224,7 @@ static void tegra234_ras_clear_ccpm_stale(void)
+ 
+ #define TEGRA234_MB2_POISON_ADDR	ULL(0x60a5a5a5a5a5a5a5)
+ static bool tegra234_ccpmu_is_mb2_boot_poison(uint32_t base,
+-		        uint64_t status)
++		        uint64_t status,uint64_t addr)
+ {
+   if (base != TEGRA234_RAS_CCPMU_BASE) {
+      return false;
+@@ -232,10 +232,10 @@ static bool tegra234_ccpmu_is_mb2_boot_poison(uint32_t base,
+   if (ERR_STATUS_GET_FIELD(status, UE) == 0U) {
+      return false;
+   }
+-  if (mmio_read_64(TEGRA234_RAS_CCPMU_BASE + ERR_ADDR(0)) !=
+-      TEGRA234_MB2_POISON_ADDR) {
+-	  return false;
+-  }
++  if (addr != TEGRA234_MB2_POISON_ADDR){
++     return false;
++  }  
++
+   return true;
+ }	
+ 
+@@ -345,7 +345,7 @@ static int32_t tegra234_ras_node_handler(uint32_t base, const char *name,
+ 
+ 		ret = -ENOTRECOVERABLE;
+ 		/* Suppress halt for the known MB2 stale CCPMU boot poison. */
+-		if (tegra234_ccpmu_is_mb2_boot_poison(base, status)) {
++		if (tegra234_ccpmu_is_mb2_boot_poison(base, status, addr)) {
+ 		   WARN("tegra234: suppressing stale MB2 CCPMU boot poison "
+ 		         "(status=0x%" PRIx64 "), clearing\n", status);
+ 		   tegra234_ras_clear_ccpm_stale();
+diff --git a/plat/nvidia/tegra/soc/t234/plat_setup.c b/plat/nvidia/tegra/soc/t234/plat_setup.c
+index f074d54..9079475 100644
+--- a/plat/nvidia/tegra/soc/t234/plat_setup.c
++++ b/plat/nvidia/tegra/soc/t234/plat_setup.c
+@@ -31,6 +31,8 @@
+ #include <tegra_platform.h>
+ #include <tegra_private.h>
+ #include <lib/xlat_tables/xlat_tables_v2.h>
++#include <lib/extensions/ras_arch.h>
++#include <tegra234_ras_private.h>
+ 
+ /* ID for spe-console */
+ #define TEGRA_CONSOLE_SPE_ID		0xFE
+@@ -232,8 +234,50 @@ void plat_early_platform_setup(void)
+ 	mce_clean_and_invalidate_caches();
+ 
+ #if RAS_EXTENSION
+-	/* Enable RAS handling for all the common nodes */
+-	tegra234_ras_init_common();
++    /*
++     * WAR: Clear any stale CCPMU RAS errors latched during MB1/MB2
++     * boot before arming RAS interrupts. If a stale UE is present
++     * when tegra234_ras_init_common() enables interrupts, it fires
++     * immediately. The SDEI client (Xen/kernel) is not yet registered
++     * at this point, so sdei_dispatch_event() returns -1, ATF then
++     * attempts to power off the core via ARI, but the MCE is already
++     * broken (IERR=5 uCode Error), causing ARI timeout and assert.
++     *
++     * Only clear V bit — preserve ADDR so post-mortem debug is possible
++     * via ATF's own error log above.
++     */
++    {
++        uint64_t status = mmio_read_64(TEGRA234_RAS_CCPMU_BASE +
++                                       ERR_STATUS(0));
++        if (ERR_STATUS_GET_FIELD(status, V) != 0U) {
++            uint64_t clr = 0ULL;
++
++            INFO("WAR: stale CCPMU RAS error detected before RAS init\n");
++            INFO("     ERR_STATUS=0x%llx ERR_ADDR=0x%llx\n",
++                 (unsigned long long)status,
++                 (unsigned long long)mmio_read_64(
++                     TEGRA234_RAS_CCPMU_BASE + ERR_ADDR(0)));
++
++            /* W1C: clear Valid and UE bits */
++            ERR_STATUS_SET_FIELD(clr, V, 1);
++            if (ERR_STATUS_GET_FIELD(status, UE) != 0U)
++                ERR_STATUS_SET_FIELD(clr, UE, 1);
++            if (ERR_STATUS_GET_FIELD(status, OF) != 0U)
++                ERR_STATUS_SET_FIELD(clr, OF, 1);
++
++            mmio_write_64(TEGRA234_RAS_CCPMU_BASE + ERR_STATUS(0), clr);
++            mmio_write_64(TEGRA234_RAS_CCPMU_BASE + ERR_MISC0(0), 0ULL);
++            mmio_write_64(TEGRA234_RAS_CCPMU_BASE + ERR_MISC1(0), 0ULL);
++            /* Do NOT clear ERR_ADDR — preserve for debug */
++            dsb();
++            isb();
++
++            INFO("WAR: stale CCPMU RAS error cleared\n");
++        }
++    }
++
++    /* Now safe to arm RAS interrupts */
++    tegra234_ras_init_common();
+ #endif
+ 
+ 	/*

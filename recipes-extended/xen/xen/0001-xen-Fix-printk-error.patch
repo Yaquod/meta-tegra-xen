@@ -1,0 +1,31 @@
+From c93ab125cafff46218c2afccb8b8d880cb1fd322 Mon Sep 17 00:00:00 2001
+From: Ahmed Wafdy <ahmedadelwafdy782@gmail.com>
+Date: Thu, 26 Feb 2026 21:13:16 +0000
+Subject: [PATCH] xen: Fix printk error
+
+---
+ xen/arch/arm/platforms/tegra234.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/xen/arch/arm/platforms/tegra234.c b/xen/arch/arm/platforms/tegra234.c
+index b265b2dde0..f90c93d049 100644
+--- a/xen/arch/arm/platforms/tegra234.c
++++ b/xen/arch/arm/platforms/tegra234.c
+@@ -35,7 +35,7 @@ static int __init tegra234_init(void)
+ {
+     printk(XENLOG_INFO
+ 	   "Xen: Initilaizing NVIDIA Tegra234 (Jetson Orin) Platform\n");
+-    print(XENLOG_INFO 
++    printk(XENLOG_INFO 
+ 	  "Xen: UART @ 0x%08lx, GICD @ 0x%08lx, GICR @ 0x%08lx\n",
+   	  TEGRA234_UART_BASE, TEGRA234_GICD_BASE, TEGRA234_GICR_BASE);
+     return 0;
+@@ -103,7 +103,7 @@ static const char * const tegra234_dt_compat[] __initconst =
+ };
+ 
+ PLATFORM_START(tegra234, "NVIDIA Tegra234")
+-    .compatible = tegra234_dt_compat
++    .compatible = tegra234_dt_compat,
+     .init = tegra234_init,
+     .specific_mapping = tegra234_specific_mapping,
+     .blacklist_dev = tegra234_blacklist_dev,

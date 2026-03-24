@@ -1,0 +1,53 @@
+From 03b3189ce6c74172969a0d3b037097e3277d8dd2 Mon Sep 17 00:00:00 2001
+From: Ahmed Wafdy <ahmedadelwafdy782@gmail.com>
+Date: Fri, 27 Feb 2026 22:55:28 +0000
+Subject: [PATCH] arm: efi: Tegra234: Clear CCPMU RAS and drain SError before
+ ExitBootServices
+
+---
+ xen/arch/arm/efi/efi-boot.h | 20 +++++++++++++++++++-
+ 1 file changed, 19 insertions(+), 1 deletion(-)
+
+diff --git a/xen/arch/arm/efi/efi-boot.h b/xen/arch/arm/efi/efi-boot.h
+index b3d9fb1eff..57cb3e970c 100644
+--- a/xen/arch/arm/efi/efi-boot.h
++++ b/xen/arch/arm/efi/efi-boot.h
+@@ -398,19 +398,37 @@ static void __init efi_arch_pre_exit_boot(void)
+      * then immediately re-mask. This prevents ATF from seeing it during
+      * el3_exit ERET with SCR_EL3.EA=1.
+      */
++    {
++    	volatile uint64_t *err_status = (volatile uint64_t *)0x0E001010UL;
++	volatile uint64_t *err_addr = (volatile uint64_t *)0x0E001018UL;
++	uint64_t status = *err_status;
++
++	if (status & (1ULL << 30)) {
++	    printk(XENLOG_WARNING
++		   "Tegra234: clearing stale CCPMU RAS "
++		   "status=0x%016llx addr=0x%016llx\n",
++		  (unsigned long long)status,(unsigned long long)*err_addr);
++	    *err_status = (1ULL << 31) | (1ULL << 30); /* w1c AV|V */
++	    *err_addr   = 0ULL;
++	}
++    }
++    /* ensure MMIO write is visible, then drain any latched SError */
+     asm volatile(
+         "dsb sy\n\t"
+         "isb\n\t"
+         "msr daifclr, #4\n\t"
+         "isb\n\t"
++	"dsb sy\n\t"
+         "nop\n\t"
+         "nop\n\t"
++	"nop\n\t"
++	"nop\n\t"
+         "msr daifset, #4\n\t"
+         "isb\n\t"
+         "dsb sy\n\t"
+         ::: "memory"
+     );
+-#endif
++#endif /* CONFIG_ARM_64 */
+ }
+ 
+ static void __init noreturn efi_arch_post_exit_boot(void)

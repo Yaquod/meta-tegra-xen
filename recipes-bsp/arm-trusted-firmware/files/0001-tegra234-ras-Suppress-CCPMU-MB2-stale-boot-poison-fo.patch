@@ -1,0 +1,63 @@
+From 073d05f7730039eea032ef7f828d57c284f8b936 Mon Sep 17 00:00:00 2001
+From: Ahmed Wafdy <ahmedadelwafdy782@gmail.com>
+Date: Sat, 28 Feb 2026 20:33:52 +0000
+Subject: [PATCH] tegra234: ras: Suppress CCPMU MB2 stale boot poison for Xen
+
+MB2 leaves a stale CCPMU RAS UE with ADDR=0x60a5a5a5a5a5a5a5 (MB2 poison
+pattern written to detect uninitialized memory access). Under normal UEFI
+boot the OS registers an SDEI handler before ExitBootServices fires. Xen
+bypasses ExitBootServices entirely so SDEI is never registered.
+
+When the SError fires during the ATF EL3->EL2 transition, the existing
+tegra234_ras_node_handler correctly identifies the CCPMU UE, prints the
+full diagnostic, sets ret=-ENOTRECOVERABLE, and the caller halts the system.
+
+Fix: immediately after ret=-ENOTRECOVERABLE is set, check whether this is
+the known MB2 boot poison (base==CCPMU, UE set, ADDR==0x60a5a5a5a5a5a5a5).
+If so, clear ERR_STATUS and ERR_ADDR, and set ret=0 so the system continues.
+---
+ plat/nvidia/tegra/soc/t234/plat_ras.c | 24 ++++++++++++++++++++++++
+ 1 file changed, 24 insertions(+)
+
+diff --git a/plat/nvidia/tegra/soc/t234/plat_ras.c b/plat/nvidia/tegra/soc/t234/plat_ras.c
+index 432fe39..b092e35 100644
+--- a/plat/nvidia/tegra/soc/t234/plat_ras.c
++++ b/plat/nvidia/tegra/soc/t234/plat_ras.c
+@@ -222,6 +222,23 @@ static void tegra234_ras_clear_ccpm_stale(void)
+   }
+ }	
+ 
++#define TEGRA234_MB2_POISON_ADDR	ULL(0x60a5a5a5a5a5a5a5)
++static bool tegra234_ccpmu_is_mb2_boot_poison(uint32_t base,
++		        uint64_t status)
++{
++  if (base != TEGRA234_RAS_CCPMU_BASE) {
++     return false;
++  }
++  if (ERR_STATUS_GET_FIELD(status, UE) == 0U) {
++     return false;
++  }
++  if (mmio_read_64(TEGRA234_RAS_CCPMU_BASE + ERR_ADDR(0)) !=
++      TEGRA234_MB2_POISON_ADDR) {
++	  return false;
++  }
++  return true;
++}	
++
+ /*******************************************************************************
+  * Error handling functions
+  ******************************************************************************/
+@@ -327,6 +344,13 @@ static int32_t tegra234_ras_node_handler(uint32_t base, const char *name,
+ 		}
+ 
+ 		ret = -ENOTRECOVERABLE;
++		/* Suppress halt for the known MB2 stale CCPMU boot poison. */
++		if (tegra234_ccpmu_is_mb2_boot_poison(base, status)) {
++		   WARN("tegra234: suppressing stale MB2 CCPMU boot poison "
++		         "(status=0x%" PRIx64 "), clearing\n", status);
++		   tegra234_ras_clear_ccpm_stale();
++		   ret = 0;
++		}
+ 	} else {
+ 		/* For corrected error, simply clear it. */
+ 		ERR_STATUS_SET_FIELD(val, CE, 1);

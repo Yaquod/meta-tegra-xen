@@ -1,0 +1,1185 @@
+From 8aae474417e5340e7153088710dfe73ff866bb44 Mon Sep 17 00:00:00 2001
+From: Ahmed Wafdy <ahmedadelwafdy782@gmail.com>
+Date: Sun, 1 Mar 2026 00:49:28 +0000
+Subject: [PATCH] Clear only ERR_STATUS.V from Xen, never touch ERR_ADDR, so
+ ATF's poison signature check can succeed
+
+Implement SDEI Client in Xen
+
+Initialize an early boot SDEI handler at EL2 to accept events from EL3
+Firmware.
+Ensure the SDEI handler runs with interrupts masked or priority
+elevated.
+
+Without this handler, EL3 has no destination for RAS events, causing system asserts
+
+Xen must virtualize SDEI for Guest OSes at EL1.
+
+- Prevent MCE from asserting by pre-clearing the CCPMU ERR0STATUS before MCE checks it
+---
+ config/StdGNU.mk                  |  12 +-
+ tools/configure                   |  32 +++---
+ tools/firmware/Makefile           |  12 +-
+ xen/arch/arm/Makefile             |   2 +
+ xen/arch/arm/arm64/Makefile       |   1 +
+ xen/arch/arm/arm64/sdei_entry.S   |  34 ++++++
+ xen/arch/arm/efi/efi-boot.h       | 162 +++++++++++++++++++++++---
+ xen/arch/arm/include/asm/sdei.h   |  73 ++++++++++++
+ xen/arch/arm/platforms/tegra234.c | 100 ++++++++++++++---
+ xen/arch/arm/sdei.c               | 181 ++++++++++++++++++++++++++++++
+ xen/arch/arm/setup.c              |   3 +
+ xen/arch/arm/smpboot.c            |   3 +
+ xen/arch/arm/vsdei.c              |  26 +++++
+ xen/arch/arm/vsmc.c               |  13 ++-
+ xen/common/efi/boot.c             | 149 +++++++++++++++++++++++-
+ 15 files changed, 743 insertions(+), 60 deletions(-)
+ create mode 100644 xen/arch/arm/arm64/sdei_entry.S
+ create mode 100644 xen/arch/arm/include/asm/sdei.h
+ create mode 100644 xen/arch/arm/sdei.c
+ create mode 100644 xen/arch/arm/vsdei.c
+
+diff --git a/config/StdGNU.mk b/config/StdGNU.mk
+index aaa0d007f7..7893ed87b3 100644
+--- a/config/StdGNU.mk
++++ b/config/StdGNU.mk
+@@ -1,15 +1,15 @@
+ AS         = $(CROSS_COMPILE)as
+-LD         = $(CROSS_COMPILE)ld
++LD         ?= $(CROSS_COMPILE)ld
+ ifeq ($(clang),y)
+-CC         = $(CROSS_COMPILE)clang
+-CXX        = $(CROSS_COMPILE)clang++
++CC         ?= $(CROSS_COMPILE)clang
++CXX        ?= $(CROSS_COMPILE)clang++
+ LD_LTO     = $(CROSS_COMPILE)llvm-ld
+ else
+-CC         = $(CROSS_COMPILE)gcc
+-CXX        = $(CROSS_COMPILE)g++
++CC         ?= $(CROSS_COMPILE)gcc
++CXX        ?= $(CROSS_COMPILE)g++
+ LD_LTO     = $(CROSS_COMPILE)ld
+ endif
+-CPP        = $(CC) -E
++CPP        ?= $(CC) -E
+ ADDR2LINE  = $(CROSS_COMPILE)addr2line
+ AR         = $(CROSS_COMPILE)ar
+ RANLIB     = $(CROSS_COMPILE)ranlib
+diff --git a/tools/configure b/tools/configure
+index 38c0808d3a..9b653a6b88 100755
+--- a/tools/configure
++++ b/tools/configure
+@@ -9549,12 +9549,12 @@ if test -n "$SYSTEMD_CFLAGS"; then
+     pkg_cv_SYSTEMD_CFLAGS="$SYSTEMD_CFLAGS"
+  elif test -n "$PKG_CONFIG"; then
+     if test -n "$PKG_CONFIG" && \
+-    { { $as_echo "$as_me:${as_lineno-$LINENO}: \$PKG_CONFIG --exists --print-errors \"libsystemd-daemon\""; } >&5
+-  ($PKG_CONFIG --exists --print-errors "libsystemd-daemon") 2>&5
++    { { $as_echo "$as_me:${as_lineno-$LINENO}: \$PKG_CONFIG --exists --print-errors \"libsystemd\""; } >&5
++  ($PKG_CONFIG --exists --print-errors "libsystemd") 2>&5
+   ac_status=$?
+   $as_echo "$as_me:${as_lineno-$LINENO}: \$? = $ac_status" >&5
+   test $ac_status = 0; }; then
+-  pkg_cv_SYSTEMD_CFLAGS=`$PKG_CONFIG --cflags "libsystemd-daemon" 2>/dev/null`
++  pkg_cv_SYSTEMD_CFLAGS=`$PKG_CONFIG --cflags "libsystemd" 2>/dev/null`
+ 		      test "x$?" != "x0" && pkg_failed=yes
+ else
+   pkg_failed=yes
+@@ -9566,12 +9566,12 @@ if test -n "$SYSTEMD_LIBS"; then
+     pkg_cv_SYSTEMD_LIBS="$SYSTEMD_LIBS"
+  elif test -n "$PKG_CONFIG"; then
+     if test -n "$PKG_CONFIG" && \
+-    { { $as_echo "$as_me:${as_lineno-$LINENO}: \$PKG_CONFIG --exists --print-errors \"libsystemd-daemon\""; } >&5
+-  ($PKG_CONFIG --exists --print-errors "libsystemd-daemon") 2>&5
++    { { $as_echo "$as_me:${as_lineno-$LINENO}: \$PKG_CONFIG --exists --print-errors \"libsystemd\""; } >&5
++  ($PKG_CONFIG --exists --print-errors "libsystemd") 2>&5
+   ac_status=$?
+   $as_echo "$as_me:${as_lineno-$LINENO}: \$? = $ac_status" >&5
+   test $ac_status = 0; }; then
+-  pkg_cv_SYSTEMD_LIBS=`$PKG_CONFIG --libs "libsystemd-daemon" 2>/dev/null`
++  pkg_cv_SYSTEMD_LIBS=`$PKG_CONFIG --libs "libsystemd" 2>/dev/null`
+ 		      test "x$?" != "x0" && pkg_failed=yes
+ else
+   pkg_failed=yes
+@@ -9592,9 +9592,9 @@ else
+         _pkg_short_errors_supported=no
+ fi
+         if test $_pkg_short_errors_supported = yes; then
+-	        SYSTEMD_PKG_ERRORS=`$PKG_CONFIG --short-errors --print-errors --cflags --libs "libsystemd-daemon" 2>&1`
++	        SYSTEMD_PKG_ERRORS=`$PKG_CONFIG --short-errors --print-errors --cflags --libs "libsystemd" 2>&1`
+         else
+-	        SYSTEMD_PKG_ERRORS=`$PKG_CONFIG --print-errors --cflags --libs "libsystemd-daemon" 2>&1`
++	        SYSTEMD_PKG_ERRORS=`$PKG_CONFIG --print-errors --cflags --libs "libsystemd" 2>&1`
+         fi
+ 	# Put the nasty error message in config.log where it belongs
+ 	echo "$SYSTEMD_PKG_ERRORS" >&5
+@@ -9775,12 +9775,12 @@ if test -n "$SYSTEMD_CFLAGS"; then
+     pkg_cv_SYSTEMD_CFLAGS="$SYSTEMD_CFLAGS"
+  elif test -n "$PKG_CONFIG"; then
+     if test -n "$PKG_CONFIG" && \
+-    { { $as_echo "$as_me:${as_lineno-$LINENO}: \$PKG_CONFIG --exists --print-errors \"libsystemd-daemon\""; } >&5
+-  ($PKG_CONFIG --exists --print-errors "libsystemd-daemon") 2>&5
++    { { $as_echo "$as_me:${as_lineno-$LINENO}: \$PKG_CONFIG --exists --print-errors \"libsystemd\""; } >&5
++  ($PKG_CONFIG --exists --print-errors "libsystemd") 2>&5
+   ac_status=$?
+   $as_echo "$as_me:${as_lineno-$LINENO}: \$? = $ac_status" >&5
+   test $ac_status = 0; }; then
+-  pkg_cv_SYSTEMD_CFLAGS=`$PKG_CONFIG --cflags "libsystemd-daemon" 2>/dev/null`
++  pkg_cv_SYSTEMD_CFLAGS=`$PKG_CONFIG --cflags "libsystemd" 2>/dev/null`
+ 		      test "x$?" != "x0" && pkg_failed=yes
+ else
+   pkg_failed=yes
+@@ -9792,12 +9792,12 @@ if test -n "$SYSTEMD_LIBS"; then
+     pkg_cv_SYSTEMD_LIBS="$SYSTEMD_LIBS"
+  elif test -n "$PKG_CONFIG"; then
+     if test -n "$PKG_CONFIG" && \
+-    { { $as_echo "$as_me:${as_lineno-$LINENO}: \$PKG_CONFIG --exists --print-errors \"libsystemd-daemon\""; } >&5
+-  ($PKG_CONFIG --exists --print-errors "libsystemd-daemon") 2>&5
++    { { $as_echo "$as_me:${as_lineno-$LINENO}: \$PKG_CONFIG --exists --print-errors \"libsystemd\""; } >&5
++  ($PKG_CONFIG --exists --print-errors "libsystemd") 2>&5
+   ac_status=$?
+   $as_echo "$as_me:${as_lineno-$LINENO}: \$? = $ac_status" >&5
+   test $ac_status = 0; }; then
+-  pkg_cv_SYSTEMD_LIBS=`$PKG_CONFIG --libs "libsystemd-daemon" 2>/dev/null`
++  pkg_cv_SYSTEMD_LIBS=`$PKG_CONFIG --libs "libsystemd" 2>/dev/null`
+ 		      test "x$?" != "x0" && pkg_failed=yes
+ else
+   pkg_failed=yes
+@@ -9818,9 +9818,9 @@ else
+         _pkg_short_errors_supported=no
+ fi
+         if test $_pkg_short_errors_supported = yes; then
+-	        SYSTEMD_PKG_ERRORS=`$PKG_CONFIG --short-errors --print-errors --cflags --libs "libsystemd-daemon" 2>&1`
++	        SYSTEMD_PKG_ERRORS=`$PKG_CONFIG --short-errors --print-errors --cflags --libs "libsystemd" 2>&1`
+         else
+-	        SYSTEMD_PKG_ERRORS=`$PKG_CONFIG --print-errors --cflags --libs "libsystemd-daemon" 2>&1`
++	        SYSTEMD_PKG_ERRORS=`$PKG_CONFIG --print-errors --cflags --libs "libsystemd" 2>&1`
+         fi
+ 	# Put the nasty error message in config.log where it belongs
+ 	echo "$SYSTEMD_PKG_ERRORS" >&5
+diff --git a/tools/firmware/Makefile b/tools/firmware/Makefile
+index 345037b93b..f52c742e7e 100644
+--- a/tools/firmware/Makefile
++++ b/tools/firmware/Makefile
+@@ -20,13 +20,13 @@ SEABIOSLD ?= $(LD)
+ SEABIOS_EXTRAVERSION ?= "-Xen"
+ 
+ ovmf-dir:
+-	GIT=$(GIT) $(XEN_ROOT)/scripts/git-checkout.sh $(OVMF_UPSTREAM_URL) $(OVMF_UPSTREAM_REVISION) ovmf-dir
++	GIT="$(GIT)" $(XEN_ROOT)/scripts/git-checkout.sh $(OVMF_UPSTREAM_URL) $(OVMF_UPSTREAM_REVISION) ovmf-dir
+ 	cp ovmf-makefile ovmf-dir/Makefile;
+ 
+ seabios-dir:
+-	GIT=$(GIT) $(XEN_ROOT)/scripts/git-checkout.sh $(SEABIOS_UPSTREAM_URL) $(SEABIOS_UPSTREAM_REVISION) seabios-dir
++	GIT="$(GIT)" $(XEN_ROOT)/scripts/git-checkout.sh $(SEABIOS_UPSTREAM_URL) $(SEABIOS_UPSTREAM_REVISION) seabios-dir
+ 	cp seabios-config seabios-dir/.config;
+-	$(MAKE) -C seabios-dir olddefconfig CC=$(SEABIOSCC) LD=$(SEABIOSLD)
++	$(MAKE) -C seabios-dir olddefconfig CC="$(SEABIOSCC)" LD="$(SEABIOSLD)"
+ 	rm -f seabios-dir/.version
+ 	echo '$(SEABIOS_UPSTREAM_REVISION)' > seabios-dir/.version
+ 
+@@ -41,7 +41,7 @@ ifeq ($(CONFIG_ROMBIOS),y)
+ 	false ; \
+ 	fi
+ endif
+-	$(MAKE) CC=$(CC) PYTHON=$(PYTHON) subdirs-$@
++	$(MAKE) CC="$(CC)" PYTHON="$(PYTHON)" subdirs-$@
+ 
+ .PHONY: install
+ install: all
+@@ -116,7 +116,7 @@ seabios-dir-force-update: seabios-dir
+ 
+ subdir-clean-seabios-dir:
+ 	set -e; if test -d seabios-dir/.; then \
+-		$(MAKE) -C seabios-dir CC=$(SEABIOSCC) LD=$(SEABIOSLD) clean; \
++		$(MAKE) -C seabios-dir CC="$(SEABIOSCC)" LD="$(SEABIOSLD)" clean; \
+ 	fi
+ 
+ subtree-force-update:
+@@ -132,4 +132,4 @@ subtree-force-update-all:
+ 	$(MAKE) ovmf-dir-force-update
+ 
+ subdir-all-seabios-dir: seabios-dir
+-	$(MAKE) -C $< CC=$(SEABIOSCC) LD=$(SEABIOSLD) PYTHON=$(PYTHON) EXTRAVERSION=$(SEABIOS_EXTRAVERSION) all;
++	$(MAKE) -C $< CC="$(SEABIOSCC)" LD="$(SEABIOSLD)" PYTHON=$(PYTHON) EXTRAVERSION=$(SEABIOS_EXTRAVERSION) all;
+diff --git a/xen/arch/arm/Makefile b/xen/arch/arm/Makefile
+index 7bf07e9920..13e03db896 100644
+--- a/xen/arch/arm/Makefile
++++ b/xen/arch/arm/Makefile
+@@ -45,6 +45,8 @@ obj-y += platform_hypercall.o
+ obj-y += physdev.o
+ obj-y += processor.o
+ obj-y += psci.o
++obj-y += sdei.o
++obj-y += vsdei.o
+ obj-y += setup.o
+ obj-y += shutdown.o
+ obj-y += smp.o
+diff --git a/xen/arch/arm/arm64/Makefile b/xen/arch/arm/arm64/Makefile
+index f89d5fb4fb..1f6b997b8a 100644
+--- a/xen/arch/arm/arm64/Makefile
++++ b/xen/arch/arm/arm64/Makefile
+@@ -10,6 +10,7 @@ obj-y += domain.o
+ obj-y += entry.o
+ obj-y += head.o
+ obj-y += insn.o
++obj-y += sdei_entry.o
+ obj-$(CONFIG_LIVEPATCH) += livepatch.o
+ obj-y += mm.o
+ obj-y += smc.o
+diff --git a/xen/arch/arm/arm64/sdei_entry.S b/xen/arch/arm/arm64/sdei_entry.S
+new file mode 100644
+index 0000000000..b381a8a0f5
+--- /dev/null
++++ b/xen/arch/arm/arm64/sdei_entry.S
+@@ -0,0 +1,34 @@
++#include <asm/asm_defns.h>
++
++ENTRY(sdei_asm_handler)
++    /*
++     * ATF calls us with:
++     *   X0 = event number
++     *   X1 = handler arg
++     * We must preserve X2-X17 (caller-saved in SDEI ABI)
++     * and complete via SDEI_EVENT_COMPLETE SMC.
++     */
++    stp     x0,  x1,  [sp, #-96]!
++    stp     x2,  x3,  [sp, #16]
++    stp     x4,  x5,  [sp, #32]
++    stp     x6,  x7,  [sp, #48]
++    stp     x29, x30, [sp, #64]
++
++    /* call C handler: sdei_event_handler_c(event_num, arg) */
++    bl      sdei_event_handler_c
++
++    ldp     x2,  x3,  [sp, #16]
++    ldp     x4,  x5,  [sp, #32]
++    ldp     x6,  x7,  [sp, #48]
++    ldp     x29, x30, [sp, #64]
++    ldp     x0,  x1,  [sp], #96
++
++    /* SDEI_EVENT_COMPLETE with status SDEI_EV_HANDLED=0 */
++        /* SDEI_EVENT_COMPLETE with status SDEI_EV_HANDLED=0 */
++    ldr     x0, =0xC4000025     /* use LDR pseudo-op */
++    mov     x1, #0              /* SDEI_EV_HANDLED */
++    smc     #0
++
++    /* should never return */
++1:  b       1b
++END(sdei_asm_handler)
+\ No newline at end of file
+diff --git a/xen/arch/arm/efi/efi-boot.h b/xen/arch/arm/efi/efi-boot.h
+index ccd32cb069..3290671745 100644
+--- a/xen/arch/arm/efi/efi-boot.h
++++ b/xen/arch/arm/efi/efi-boot.h
+@@ -392,25 +392,93 @@ static void __init efi_arch_process_memory_map(EFI_SYSTEM_TABLE *SystemTable,
+ static void __init efi_arch_pre_exit_boot(void)
+ {
+ #ifdef CONFIG_ARM_64
+-   /*
+-     * Drain any pending SError before ExitBootServices on Tegra234.
+-     * A pending CCPMU RAS SError, if taken at EL3 during ATF's ERET
+-     * with SCR_EL3.EA=1, will trigger ATF's fatal error handler.
+-     * Briefly unmask SError at EL2 to consume it here instead.
++    /*
++     * Tegra234: Clear any CCPMU RAS error generated during EFI image
++     * loading, then drain the SError pipeline.
++     *
++     * The CCPMU RAS error is triggered by large DMA/MC operations during
++     * kernel/initrd loading (AllocatePages + read_file). The error is
++     * latched in ERR0STATUS by the time we reach this function.
+      *
+-     * DSB before unmask ensures all prior memory transactions complete
+-     * so no new SErrors are generated by in-flight operations.
++     * We must clear the register AND drain the SError pipeline:
++     * - Clearing the register de-asserts the CCPMU error signal so no
++     *   new SError will be generated after this point.
++     * - Draining consumes any SError already latched in the CPU pipeline.
++     *
++     * Note: In EFI context the CCPMU MMIO region is accessible via
++     * physical address because UEFI firmware identity-maps device memory.
++     * TEGRA234_RAS_CCPMU_BASE = 0x0E001000
++     * ERR0STATUS offset = 0x010, ERR0ADDR offset = 0x018
++     */
++    {
++        volatile uint64_t * const err_status =
++            (volatile uint64_t *)0x0E001010UL;
++        volatile uint64_t * const err_addr =
++            (volatile uint64_t *)0x0E001018UL;
++        uint64_t status;
++        uint64_t w1c = 0ULL;
++
++        /*
++         * DSB+ISB before reading: ensure all prior MC/DMA transactions
++         * from image loading are complete and any resulting CCPMU error
++         * has been latched into ERR0STATUS before we sample it.
++         */
++        asm volatile("dsb sy\n\t isb\n\t" ::: "memory");
++
++        status = *err_status;
++
++        if ( status & (1ULL << 30) ) /* bit 30 = V (Valid) */
++        {
++            printk(XENLOG_WARNING
++                   "Tegra234: EFI pre-exit: CCPMU RAS "
++                   "status=0x%016llx addr=0x%016llx\n",
++                   (unsigned long long)status,
++                   (unsigned long long)*err_addr);
++
++            /* W1C: mirror every set field */
++            w1c |= (1ULL << 30); /* V   */
++            if ( status & (1ULL << 31) )
++                w1c |= (1ULL << 31); /* AV  */
++            if ( status & (1ULL << 29) ) /* UE */
++            {
++                w1c |= (1ULL << 29);
++                w1c |= (status & (3ULL << 10)); /* UET[11:10] */
++            }
++            if ( status & (1ULL << 27) )
++                w1c |= (1ULL << 27); /* OF  */
++            if ( status & (1ULL << 26) )
++                w1c |= (1ULL << 26); /* MV  */
++            if ( status & (1ULL << 23) )
++                w1c |= (1ULL << 23); /* DE  */
++
++            *err_status = w1c;
++            *err_addr   = 0ULL;
++
++            /*
++             * DSB: ensure the W1C write reaches the CCPMU before
++             * we unmask SError below.
++             */
++            asm volatile("dsb sy\n\t isb\n\t" ::: "memory");
++        }
++    }
++
++    /*
++     * Now drain any SError already latched in the CPU pipeline.
++     * The CCPMU clear above ensures no new SError signal is being
++     * asserted, so after this drain the pipeline is clean.
+      */
+     asm volatile(
+-        "dsb sy          \n\t"  /* complete all memory accesses */
+-        "isb             \n\t"  /* synchronize context */
+-        "msr daifclr, #4 \n\t"  /* unmask SError (A bit) */
+-        "isb             \n\t"  /* ensure unmask takes effect */
+-        "dsb sy          \n\t"  /* consume any pending SError */
+-        "nop             \n\t"  /* speculation barrier */
++        "dsb sy          \n\t"
++        "isb             \n\t"
++        "msr daifclr, #4 \n\t"   /* unmask SError */
++        "isb             \n\t"
++        "dsb sy          \n\t"   /* consume pending SError */
+         "nop             \n\t"
+-        "msr daifset, #4 \n\t"  /* re-mask SError */
+-        "isb             \n\t"  /* synchronize */
++        "nop             \n\t"
++        "nop             \n\t"
++        "nop             \n\t"
++        "msr daifset, #4 \n\t"   /* re-mask SError */
++        "isb             \n\t"
+         ::: "memory"
+     );
+ #endif /* CONFIG_ARM_64 */
+@@ -426,6 +494,26 @@ static void __init efi_arch_cfg_file_early(const EFI_LOADED_IMAGE *image,
+                                            const char *section)
+ {
+     union string name;
++    {
++        volatile uint64_t * const s = (volatile uint64_t *)0x0E001010UL;
++        volatile uint64_t * const a = (volatile uint64_t *)0x0E001018UL;
++        uint64_t st;
++        uint64_t w = 0ULL;
++
++        asm volatile("dsb sy\n\t isb\n\t" ::: "memory");
++        st = *s;
++        if ( st & (1ULL << 30) ) {
++            w |= (1ULL << 30);
++            if ( st & (1ULL << 31) ) w |= (1ULL << 31);
++            if ( st & (1ULL << 29) ) {
++                w |= (1ULL << 29);
++                w |= (st & (3ULL << 10));
++            }
++            *s = w;
++            *a = 0ULL;
++            asm volatile("dsb sy\n\t isb\n\t" ::: "memory");
++        }
++    }
+ 
+     /*
+      * The DTB must be processed before any other entries in the configuration
+@@ -964,9 +1052,53 @@ static void __init efi_arch_load_addr_check(const EFI_LOADED_IMAGE *loaded_image
+         blexit(L"Xen must be loaded at a 4 KByte boundary.");
+ }
+ 
++static noinline void __init tegra234_ccpmu_clear(void)
++{
++    uint64_t st = 0ULL;
++    uint64_t w1c = 0ULL;
++
++    asm volatile(
++        "dsb sy\n\t"
++        "isb\n\t"
++        "ldr %0, [%1]\n\t"
++        : "=r" (st)
++        : "r" ((uint64_t)0x0E001010UL)
++        : "memory"
++    );
++
++    if ( st & (1ULL << 30) )
++    {
++        w1c |= (1ULL << 30);
++        if ( st & (1ULL << 31) ) w1c |= (1ULL << 31);
++        if ( st & (1ULL << 29) )
++        {
++            w1c |= (1ULL << 29);
++            w1c |= (st & (3ULL << 10));
++        }
++        if ( st & (1ULL << 27) ) w1c |= (1ULL << 27);
++        if ( st & (1ULL << 26) ) w1c |= (1ULL << 26);
++        if ( st & (1ULL << 23) ) w1c |= (1ULL << 23);
++
++        asm volatile(
++            "str %0, [%1]\n\t"
++            "str xzr, [%2]\n\t"
++            "dsb sy\n\t"
++            "isb\n\t"
++            :
++            : "r" (w1c),
++              "r" ((uint64_t)0x0E001010UL),
++              "r" ((uint64_t)0x0E001018UL)
++            : "memory"
++        );
++    }
++}
++
+ static bool __init efi_arch_use_config_file(EFI_SYSTEM_TABLE *SystemTable)
+ {
+     bool load_cfg_file = true;
++
++    tegra234_ccpmu_clear();
++
+     /*
+      * For arm, we may get a device tree from GRUB (or other bootloader)
+      * that contains modules that have already been loaded into memory.  In
+diff --git a/xen/arch/arm/include/asm/sdei.h b/xen/arch/arm/include/asm/sdei.h
+new file mode 100644
+index 0000000000..3c3643fec5
+--- /dev/null
++++ b/xen/arch/arm/include/asm/sdei.h
+@@ -0,0 +1,73 @@
++/*
++ * SDEI (Software Delegated Exception Interface) client for Xen
++ * Implements Physical SDEI Client role (EL2 receiving from EL3 Firmware)
++ *
++ * Per ARM DEN0054C 
++ * Copyright (C) 2026 Ahmed Wafdy ahmedadelwafdy782@gmail.com
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ */
++
++#ifndef __ASM_ARM_SDEI_H__
++#define __ASM_ARM_SDEI_H__
++
++#include <xen/init.h>
++#include <xen/lib.h>
++#include <xen/types.h>
++#include <xen/errno.h>
++#include <asm/smccc.h>
++#include <asm/processor.h>
++
++/* SDEI Functions Ids */
++#define SDEI_VERSION                    0xC4000020U
++#define SDEI_EVENT_REGISTER             0xC4000021U
++#define SDEI_EVENT_ENABLE               0xC4000022U
++#define SDEI_EVENT_DISABLE              0xC4000023U
++#define SDEI_EVENT_CONTEXT              0xC4000024U
++#define SDEI_EVENT_COMPLETE             0xC4000025U
++#define SDEI_EVENT_COMPLETE_AND_RESUME  0xC4000026U
++#define SDEI_EVENT_UNREGISTER           0xC4000027U
++#define SDEI_EVENT_STATUS               0xC4000028U
++#define SDEI_EVENT_GET_INFO             0xC4000029U
++#define SDEI_PE_MASK                    0xC400002BU
++#define SDEI_PE_UNMASK                  0xC400002CU
++#define SDEI_FEATURES                   0xC4000030U
++#define SDEI_PRIVATE_RESET              0xC4000031U
++#define SDEI_SHARED_RESET               0xC4000032U
++
++/* SDEI register flags */
++#define SDEI_REGF_RM_ANY    0ULL
++#define SDEI_REGF_RM_PE     1ULL
++
++/* SDEI return codes */
++#define SDEI_SUCCESS         0
++#define SDEI_NOT_SUPPORTED  -1
++#define SDEI_EINVAL         -2
++#define SDEI_EDENY          -3
++
++/* Version encoding */
++#define SDEI_VERSION_MAJOR(x)  (((x) >> 48) & 0xFFFF)
++#define SDEI_VERSION_MINOR(x)  (((x) >> 32) & 0xFFFF)
++
++
++/**
++ * Tegra234-specific SDEI event numbers.
++ * TODO:  Discover dynamically via device tree or SDEI_FEATURES.
++ */
++#define TEGRA_SDEI_EP_EVENT_BASE    300
++#define TEGRA_SDEI_MAX_CORES        12
++
++struct cpu_user_regs;
++bool vsdei_handle_call(struct cpu_user_regs *regs);
++
++void sdei_asm_handler(void);
++
++void sdei_event_handler_c(unsigned long event_num, unsigned long event_arg);
++
++int sdei_cpu_init(void);
++int sdei_init(void);
++
++#endif /* __ASM_ARM_SDEI_H__ */
+\ No newline at end of file
+diff --git a/xen/arch/arm/platforms/tegra234.c b/xen/arch/arm/platforms/tegra234.c
+index b69f7b123f..92d492c6ac 100644
+--- a/xen/arch/arm/platforms/tegra234.c
++++ b/xen/arch/arm/platforms/tegra234.c
+@@ -37,41 +37,113 @@
+ #define CCPMU_ERR0ADDR_OFF       0x018
+ #define CCPMU_ERR_STATUS_V       (1ULL << 30)  /* Valid */
+ #define CCPMU_ERR_STATUS_AV      (1ULL << 31)  /* Address Valid */
++#define CCPMU_ERR_STATUS_UE        (1ULL << 29)  /* Uncorrected Error */
++#define CCPMU_ERR_STATUS_OF        (1ULL << 27)  /* Overflow */
++#define CCPMU_ERR_STATUS_MV        (1ULL << 26)  /* Multiple Valid Errors */
++#define CCPMU_ERR_STATUS_DE        (1ULL << 24)  /* Deferred Error */
++#define CCPMU_ERR_STATUS_UET_MASK  (3ULL << 20)  /* Uncorrected Error Type Mask (Bits 21:20) */
+ 
+ static int __init tegra234_init(void)
+ {
+     void __iomem *ccpmu;
+-    uint64_t status;
++    void __iomem *ih;
++    uint64_t status, addr, w1c;
+ 
+     printk(XENLOG_INFO
+-	   "Xen: Initializing NVIDIA Tegra234 (Jetson Orin) Platform\n");
+-    printk(XENLOG_INFO 
+-	  "Xen: UART @ 0x%08lx, GICD @ 0x%08lx, GICR @ 0x%08lx\n",
+-  	  TEGRA234_UART_BASE, TEGRA234_GICD_BASE, TEGRA234_GICR_BASE);
++           "Xen: Initializing NVIDIA Tegra234 (Jetson Orin) Platform\n");
++    printk(XENLOG_INFO
++           "Xen: UART @ 0x%08lx, GICD @ 0x%08lx, GICR @ 0x%08lx\n",
++           TEGRA234_UART_BASE, TEGRA234_GICD_BASE, TEGRA234_GICR_BASE);
++
++    /* Step 1: Clear CCPMU RAS error */
+     ccpmu = ioremap_nocache(TEGRA234_CCPMU_BASE, TEGRA234_CCPMU_SIZE);
+     if ( !ccpmu )
+     {
+-        printk(XENLOG_WARNING "Tegra234: failed to map CCPMU — stale RAS not cleared\n");
+-        return 0; /* non-fatal, but expect possible SDEI issues */
++        printk(XENLOG_WARNING
++               "Tegra234: failed to map CCPMU\n");
++        return 0;
+     }
+ 
++    /* DSB before read: ensure any in-flight MC transactions completed */
++    dsb(sy);
++    isb();
++
+     status = readq(ccpmu + CCPMU_ERR0STATUS_OFF);
++    addr   = readq(ccpmu + CCPMU_ERR0ADDR_OFF);
++    w1c    = 0ULL;
++
+     if ( status & CCPMU_ERR_STATUS_V )
+     {
+         printk(XENLOG_WARNING
+-               "Tegra234: clearing stale CCPMU RAS status=0x%016llx addr=0x%016llx\n",
++               "Tegra234: clearing CCPMU RAS "
++               "status=0x%016llx addr=0x%016llx\n",
+                (unsigned long long)status,
+-               (unsigned long long)readq(ccpmu + CCPMU_ERR0ADDR_OFF));
+-
+-        /* W1C: write 1 to AV and V to clear */
+-        writeq(CCPMU_ERR_STATUS_AV | CCPMU_ERR_STATUS_V,
+-               ccpmu + CCPMU_ERR0STATUS_OFF);
++               (unsigned long long)addr);
++
++        w1c |= CCPMU_ERR_STATUS_V;
++        if ( status & CCPMU_ERR_STATUS_AV )
++            w1c |= CCPMU_ERR_STATUS_AV;
++        if ( status & CCPMU_ERR_STATUS_UE )
++        {
++            w1c |= CCPMU_ERR_STATUS_UE;
++            w1c |= (status & CCPMU_ERR_STATUS_UET_MASK);
++        }
++        if ( status & CCPMU_ERR_STATUS_OF )
++            w1c |= CCPMU_ERR_STATUS_OF;
++        if ( status & CCPMU_ERR_STATUS_MV )
++            w1c |= CCPMU_ERR_STATUS_MV;
++        if ( status & CCPMU_ERR_STATUS_DE )
++            w1c |= CCPMU_ERR_STATUS_DE;
++
++        writeq(w1c,  ccpmu + CCPMU_ERR0STATUS_OFF);
+         writeq(0ULL, ccpmu + CCPMU_ERR0ADDR_OFF);
+-
+         dsb(sy);
++        isb();
+     }
+ 
+     iounmap(ccpmu);
++
++    /*
++     * Step 2: Unmask IH RAS interrupt sources now that CCPMU is clean.
++     *
++     * ATF masked all IH sources in bl31_plat_runtime_setup() to prevent
++     * the MCE uCode error from firing as a RAS PPI during Xen EFI boot.
++     * Now that CCPMU ERR0STATUS is cleared, unmask so that genuine RAS
++     * errors during Xen runtime are reported normally.
++     *
++     * IH_RAS_MUX_BASE = 0x0E005000
++     * CORE0_RAS_GENERAL_MASK offset = 0x000, stride PER_CORE_IH_OFFSET=0x28
++     * Writing 0 unmasks all sources.
++     */
++    {
++#define TEGRA234_IH_RAS_MUX_BASE    0x0E005000UL
++#define TEGRA234_IH_RAS_MUX_SIZE    0x00001000UL
++#define TEGRA234_PER_CORE_IH_OFFSET 0x28UL
++#define TEGRA234_CORE_COUNT         12U
++
++        unsigned int i;
++
++        ih = ioremap_nocache(TEGRA234_IH_RAS_MUX_BASE,
++                             TEGRA234_IH_RAS_MUX_SIZE);
++        if ( !ih )
++        {
++            printk(XENLOG_WARNING
++                   "Tegra234: failed to map IH - RAS interrupts remain masked\n");
++            return 0;
++        }
++
++        for ( i = 0U; i < TEGRA234_CORE_COUNT; i++ )
++        {
++            uint32_t off = (TEGRA234_PER_CORE_IH_OFFSET * i) + 0x000U;
++            writeq(0ULL, ih + off);  /* 0 = unmask all sources */
++        }
++        dsb(sy);
++        isb();
++
++        iounmap(ih);
++        printk(XENLOG_INFO "Tegra234: IH RAS sources unmasked\n");
++    }
++
+     return 0;
+ }
+ 
+diff --git a/xen/arch/arm/sdei.c b/xen/arch/arm/sdei.c
+new file mode 100644
+index 0000000000..5db77a5296
+--- /dev/null
++++ b/xen/arch/arm/sdei.c
+@@ -0,0 +1,181 @@
++/*
++ * SDEI (Software Delegated Exception Interface) client for Xen
++ * Implements Physical SDEI Client role (EL2 receiving from EL3 Firmware)
++ *
++ * Per ARM DEN0054C 
++ * Copyright (C) 2026 Ahmed Wafdy ahmedadelwafdy782@gmail.com
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation; either version 2 of the License, or
++ * (at your option) any later version.
++ */
++
++#include <xen/init.h>
++#include <xen/lib.h>
++#include <xen/types.h>
++#include <xen/errno.h>
++#include <xen/percpu.h>
++#include <xen/smp.h>
++#include <asm/smccc.h>
++#include <asm/processor.h>
++#include <asm/sdei.h>
++
++DEFINE_PER_CPU(bool, sdei_event_pending);
++DEFINE_PER_CPU(int, sdei_last_event);
++
++static bool sdei_available;
++static uint64_t sdei_firmware_version;
++
++
++/**
++ * Query SDEI firmware version via smc.
++ * This should be called after PSCI/SMCC init. 
++ */
++static int __init sdei_probe(void)
++{
++    struct arm_smccc_res res;
++    arm_smccc_smc(SDEI_VERSION,&res);
++
++    if ((long)res.a0 < 0)
++    {
++        printk(XENLOG_INFO "SDEI: not supported by frimware (ret=%ld)\n",(long)res.a0);
++        return -ENODEV;
++    }
++
++    sdei_firmware_version = res.a0;
++    printk(XENLOG_INFO "SDEI: frimware version %lu.%lu\n", SDEI_VERSION_MAJOR(res.a0), SDEI_VERSION_MINOR(res.a0));
++    sdei_available = true;
++    return 0;
++}
++
++/**
++ * Register an SDEI event handler for a given event number and argument.
++ * This should be called after sdei_probe confirms availability.
++ */
++static int __init sdei_register_event(int event_num, uint64_t handler, uint64_t flags, uint64_t arg)
++{
++    struct arm_smccc_res res;
++    long ret;
++    /*
++     * SDEI_EVENT_REGISTER:
++     * X1 = event_num
++     * X2 = handler address
++     * X3 = handler arg (passed to handler in X1 at dispatch time)
++     * X4 = flags: SDEI_REGF_RM_PE = route to calling PE
++     * X5 = affinity: 0 (ignored for RM_PE, uses calling PE)
++     */
++    arm_smccc_smc(SDEI_EVENT_REGISTER,
++                  event_num,
++                  handler,
++                  arg,             /* X3: handler arg */
++                  SDEI_REGF_RM_PE, /* X4: route to THIS PE */
++                  0,               /* X5: affinity (ignored for RM_PE) */
++                  &res);
++                      
++    ret = (long)res.a0;
++
++    if(ret < 0)
++    {
++        printk(XENLOG_ERR "SDEI: failed to register event %d (ret=%ld)\n", event_num, ret);
++        return (int)ret;
++    }
++
++    // enable the event after successful registration
++    arm_smccc_smc(SDEI_EVENT_ENABLE, event_num, &res);
++    ret = (long)res.a0;
++    if(ret < 0)
++    {
++        printk(XENLOG_ERR "SDEI: failed to enable event %d (ret=%ld)\n", event_num, ret);
++        return (int)ret;
++    }
++
++    printk(XENLOG_INFO "SDEI: successfully registered and enabled event %d\n", event_num);
++    return 0;
++}
++
++/**
++ * Unmask PE to allow SDEI events to be delivered to this PE.
++ */
++static int sdei_unmask_pe(void)
++{
++    struct arm_smccc_res res;
++    arm_smccc_smc(SDEI_PE_UNMASK, &res);
++    if ((long)res.a0 < 0)
++    {
++        printk(XENLOG_ERR "SDEI: failed to unmask PE (ret=%ld)\n", (long)res.a0);
++        return (int)res.a0;
++    }
++    return 0;
++}
++
++/**
++ * Per CPU initialization to unmask SDEI events. This should be called on each CPU after confirming SDEI availability.
++ * Returns 0 on success, negative error code on failure.
++ * If SDEI is not available, returns 0 without doing anything.
++ */
++int sdei_cpu_init(void)
++{
++    int cpu, ret;
++
++    if (!sdei_available)
++        return 0;
++
++    cpu = smp_processor_id();  /* which core am I? */
++
++    /*
++     * Private explicit events are per-PE.
++     * Register THIS core's event (EP_EVENT_BASE + cpu_id).
++     * Must be called on EACH cpu, not just BSP.
++     */
++    ret = sdei_register_event(TEGRA_SDEI_EP_EVENT_BASE + cpu,
++                            (uint64_t)sdei_asm_handler,
++                            SDEI_REGF_RM_PE, /* flags */
++                            0                /* handler arg */);
++    
++    if (ret) {
++        printk(XENLOG_ERR "SDEI: CPU%d event %d register failed\n",
++               cpu, TEGRA_SDEI_EP_EVENT_BASE + cpu);
++        return ret;
++    }
++
++    /* Unmask this PE so events can be delivered */
++    ret = sdei_unmask_pe();
++    if (ret)
++        return ret;
++
++    printk(XENLOG_INFO "SDEI: CPU%d initialized (event %d)\n",
++           cpu, TEGRA_SDEI_EP_EVENT_BASE + cpu);
++    return 0;
++}
++
++int __init sdei_init(void)
++{
++    int ret = sdei_probe();
++    if (ret)
++        return ret;
++
++    return sdei_cpu_init();
++}
++
++/**
++ * SDEI event handler
++ * 
++ * This is where EL3 will dispatch execution when a registered SDEI event
++ * fires.
++ * The handler runs in a constrained environment,
++ * as at the time of the event the state and consistency of the
++ * underlying OS kernel or hypervisor is unknown."
++*/
++void sdei_event_handler_c(unsigned long event_num, unsigned long arg)
++{
++    /* Per-CPU RAS event counter for deferred processing */
++    this_cpu(sdei_event_pending) = true;
++    this_cpu(sdei_last_event) = (int)event_num;
++
++    /*
++     * TODO: Queue work for Dom0 notification
++     * For now, just log at debug level.
++     */
++    printk(XENLOG_DEBUG "SDEI Event triggered: event_num=%lu, arg=%lu\n", event_num, arg);
++}
+\ No newline at end of file
+diff --git a/xen/arch/arm/setup.c b/xen/arch/arm/setup.c
+index 2ccdde5277..19543a7ad6 100644
+--- a/xen/arch/arm/setup.c
++++ b/xen/arch/arm/setup.c
+@@ -45,6 +45,7 @@
+ #include <asm/setup.h>
+ #include <xsm/xsm.h>
+ #include <asm/acpi.h>
++#include <asm/sdei.h>
+ 
+ struct bootinfo __initdata bootinfo;
+ 
+@@ -1172,6 +1173,8 @@ void __init start_xen(unsigned long boot_phys_offset,
+ 
+     check_local_cpu_features();
+ 
++    sdei_init();
++
+     init_xen_time();
+ 
+     gic_init();
+diff --git a/xen/arch/arm/smpboot.c b/xen/arch/arm/smpboot.c
+index ec76de3cac..0282e64e10 100644
+--- a/xen/arch/arm/smpboot.c
++++ b/xen/arch/arm/smpboot.c
+@@ -28,6 +28,7 @@
+ #include <asm/procinfo.h>
+ #include <asm/psci.h>
+ #include <asm/acpi.h>
++#include <asm/sdei.h>
+ 
+ cpumask_t cpu_online_map;
+ cpumask_t cpu_present_map;
+@@ -393,6 +394,8 @@ void start_secondary(void)
+     check_local_cpu_errata();
+     check_local_cpu_features();
+ 
++    sdei_cpu_init();
++
+     printk(XENLOG_DEBUG "CPU %u booted.\n", smp_processor_id());
+ 
+     startup_cpu_idle_loop();
+diff --git a/xen/arch/arm/vsdei.c b/xen/arch/arm/vsdei.c
+new file mode 100644
+index 0000000000..e0ddfec79a
+--- /dev/null
++++ b/xen/arch/arm/vsdei.c
+@@ -0,0 +1,26 @@
++/*
++ * xen/arch/arm/vsdei.c
++ *
++ * Virtual SDEI Dispatcher for Xen guests.
++ * Implements the Virtual SDEI Dispatcher role (EL2 dispatching to EL1).
++ */
++
++#include <xen/lib.h>
++#include <asm/regs.h>
++
++/*
++ * stub: Return NOT_SUPPORTED for all guest SDEI calls.
++ * TODO: will implement full virtual SDEI state machine.
++ */
++bool vsdei_handle_call(struct cpu_user_regs *regs)
++{
++    uint32_t fid = (uint32_t)get_user_reg(regs, 0);
++
++    /*
++     * For now, return SDEI_NOT_SUPPORTED for everything.
++     */
++    printk(XENLOG_WARNING "SDEI: guest call fid=0x%08x denied\n", fid);
++    set_user_reg(regs, 0, (unsigned long)(-1));  /* SDEI_NOT_SUPPORTED */
++
++    return true;
++}
+\ No newline at end of file
+diff --git a/xen/arch/arm/vsmc.c b/xen/arch/arm/vsmc.c
+index 7f2f5eb9ce..01f98ff72c 100644
+--- a/xen/arch/arm/vsmc.c
++++ b/xen/arch/arm/vsmc.c
+@@ -20,6 +20,7 @@
+ #include <asm/traps.h>
+ #include <asm/vpsci.h>
+ #include <asm/platform.h>
++#include <asm/sdei.h>
+ 
+ /* Number of functions currently supported by Hypervisor Service. */
+ #define XEN_SMCCC_FUNCTION_COUNT 3
+@@ -27,6 +28,13 @@
+ /* Number of functions currently supported by Standard Service Service Calls. */
+ #define SSSC_SMCCC_FUNCTION_COUNT (3 + VPSCI_NR_FUNCS + FFA_NR_FUNCS)
+ 
++#define SDEI_FID_MASK       0xFFE0U
++#define SDEI_FID_VALUE      0x0020U
++#define is_sdei_fid(fid)    \
++    (((fid) & SDEI_FID_MASK) == SDEI_FID_VALUE && \
++     smccc_is_conv_64(fid) && \
++     smccc_get_owner(fid) == ARM_SMCCC_OWNER_STANDARD)
++
+ static bool fill_uid(struct cpu_user_regs *regs, xen_uuid_t uuid)
+ {
+     int n;
+@@ -206,7 +214,10 @@ static bool handle_sssc(struct cpu_user_regs *regs)
+ 
+     if ( is_ffa_fid(fid) )
+         return tee_handle_call(regs);
+-
++     
++    if ( is_sdei_fid(fid) )
++        return vsdei_handle_call(regs);
++            
+     switch ( fid )
+     {
+     case ARM_SMCCC_CALL_COUNT_FID(STANDARD):
+diff --git a/xen/common/efi/boot.c b/xen/common/efi/boot.c
+index e5e86f22b2..174e1a297d 100644
+--- a/xen/common/efi/boot.c
++++ b/xen/common/efi/boot.c
+@@ -1273,6 +1273,38 @@ void EFIAPI __init noreturn efi_start(EFI_HANDLE ImageHandle,
+     bool use_cfg_file;
+     int dt_modules_found;
+ 
++    {
++        uint64_t st, w1c = 0;
++        asm volatile(
++            "dsb sy\n\t"
++            "isb\n\t"
++            "ldr %0, [%1]\n\t"
++            : "=r" (st)
++            : "r" ((uint64_t)0x0E001010UL)
++            : "memory");
++        if ( st & (1ULL << 30) ) {
++            w1c |= (1ULL << 30);
++            if ( st & (1ULL << 31) ) w1c |= (1ULL << 31);
++            if ( st & (1ULL << 29) ) {
++                w1c |= (1ULL << 29);
++                w1c |= (st & (3ULL << 10));
++            }
++            if ( st & (1ULL << 27) ) w1c |= (1ULL << 27);
++            if ( st & (1ULL << 26) ) w1c |= (1ULL << 26);
++            if ( st & (1ULL << 23) ) w1c |= (1ULL << 23);
++            asm volatile(
++                "str %0, [%1]\n\t"
++                "str xzr, [%2]\n\t"
++                "dsb sy\n\t"
++                "isb\n\t"
++                :
++                : "r" (w1c),
++                  "r" ((uint64_t)0x0E001010UL),
++                  "r" ((uint64_t)0x0E001018UL)
++                : "memory");
++        }
++    }
++
+     __set_bit(EFI_BOOT, &efi_flags);
+     __set_bit(EFI_LOADER, &efi_flags);
+ 
+@@ -1388,6 +1420,22 @@ void EFIAPI __init noreturn efi_start(EFI_HANDLE ImageHandle,
+             while ( (tail = point_tail(file_name)) != NULL )
+             {
+                 wstrcpy(tail, L".cfg");
++                /* TEGRA234 DEBUG: snapshot CCPMU RAS status just before ExitBootServices */
++                {
++                    volatile uint64_t *err_status = (volatile uint64_t *)0x0E001010UL;
++                    volatile uint64_t *err_addr   = (volatile uint64_t *)0x0E001018UL;
++                    uint64_t st = *err_status;
++                    if (st & (1ULL << 30)) { /* ERR0STATUS.V */
++                        PrintStr(L"TEGRA234: CCPMU ERR0STATUS.V set before ExitBootServices: 0x");
++                        DisplayUint(st, 16);
++                        PrintStr(L" addr=0x");
++                        DisplayUint(*err_addr, 16);
++                        PrintStr(newline);
++                    } else {
++                        PrintStr(L"TEGRA234: CCPMU clean before ExitBootServices\r\n");
++                    }
++                }
++
+                 if ( read_file(dir_handle, file_name, &cfg, NULL) )
+                     break;
+                 *tail = 0;
+@@ -1398,8 +1446,26 @@ void EFIAPI __init noreturn efi_start(EFI_HANDLE ImageHandle,
+             PrintStr(file_name);
+             PrintStr(L"'\r\n");
+         }
+-        else if ( !read_file(dir_handle, cfg_file_name, &cfg, NULL) )
+-            blexit(L"Configuration file not found.");
++        else
++        {
++            /* TEGRA234 DEBUG: snapshot CCPMU RAS status just before ExitBootServices */
++            {
++                volatile uint64_t *err_status = (volatile uint64_t *)0x0E001010UL;
++                volatile uint64_t *err_addr   = (volatile uint64_t *)0x0E001018UL;
++                uint64_t st = *err_status;
++                if (st & (1ULL << 30)) { /* ERR0STATUS.V */
++                    PrintStr(L"TEGRA234: CCPMU ERR0STATUS.V set before ExitBootServices: 0x");
++                    DisplayUint(st, 16);
++                    PrintStr(L" addr=0x");
++                    DisplayUint(*err_addr, 16);
++                    PrintStr(newline);
++                } else {
++                    PrintStr(L"TEGRA234: CCPMU clean before ExitBootServices\r\n");
++                }
++            }
++            if ( !read_file(dir_handle, cfg_file_name, &cfg, NULL) )
++                blexit(L"Configuration file not found.");
++        }
+         pre_parse(&cfg);
+ 
+         if ( section.w )
+@@ -1420,6 +1486,23 @@ void EFIAPI __init noreturn efi_start(EFI_HANDLE ImageHandle,
+                 efi_bs->FreePages(cfg.addr, PFN_UP(cfg.size));
+                 cfg.need_to_free = false;
+             }
++
++            /* TEGRA234 DEBUG: snapshot CCPMU RAS status just before ExitBootServices */
++            {
++                volatile uint64_t *err_status = (volatile uint64_t *)0x0E001010UL;
++                volatile uint64_t *err_addr   = (volatile uint64_t *)0x0E001018UL;
++                uint64_t st = *err_status;
++                if (st & (1ULL << 30)) { /* ERR0STATUS.V */
++                    PrintStr(L"TEGRA234: CCPMU ERR0STATUS.V set before ExitBootServices: 0x");
++                    DisplayUint(st, 16);
++                    PrintStr(L" addr=0x");
++                    DisplayUint(*err_addr, 16);
++                    PrintStr(newline);
++                } else {
++                    PrintStr(L"TEGRA234: CCPMU clean before ExitBootServices\r\n");
++                }
++            }
++
+             if ( !read_file(dir_handle, s2w(&name), &cfg, NULL) )
+             {
+                 PrintStr(L"Chained configuration file '");
+@@ -1438,6 +1521,22 @@ void EFIAPI __init noreturn efi_start(EFI_HANDLE ImageHandle,
+         if ( !read_section(loaded_image, L"kernel", &kernel, option_str) &&
+              name.s )
+         {
++            /* TEGRA234 DEBUG: snapshot CCPMU RAS status just before ExitBootServices */
++            {
++                volatile uint64_t *err_status = (volatile uint64_t *)0x0E001010UL;
++                volatile uint64_t *err_addr   = (volatile uint64_t *)0x0E001018UL;
++                uint64_t st = *err_status;
++                if (st & (1ULL << 30)) { /* ERR0STATUS.V */
++                    PrintStr(L"TEGRA234: CCPMU ERR0STATUS.V set before ExitBootServices: 0x");
++                    DisplayUint(st, 16);
++                    PrintStr(L" addr=0x");
++                    DisplayUint(*err_addr, 16);
++                    PrintStr(newline);
++                } else {
++                    PrintStr(L"TEGRA234: CCPMU clean before ExitBootServices\r\n");
++                }
++            }
++
+             read_file(dir_handle, s2w(&name), &kernel, option_str);
+             efi_bs->FreePool(name.w);
+         }
+@@ -1447,6 +1546,22 @@ void EFIAPI __init noreturn efi_start(EFI_HANDLE ImageHandle,
+             name.s = get_value(&cfg, section.s, "ramdisk");
+             if ( name.s )
+             {
++                /* TEGRA234 DEBUG: snapshot CCPMU RAS status just before ExitBootServices */
++                {
++                    volatile uint64_t *err_status = (volatile uint64_t *)0x0E001010UL;
++                    volatile uint64_t *err_addr   = (volatile uint64_t *)0x0E001018UL;
++                    uint64_t st = *err_status;
++                    if (st & (1ULL << 30)) { /* ERR0STATUS.V */
++                        PrintStr(L"TEGRA234: CCPMU ERR0STATUS.V set before ExitBootServices: 0x");
++                        DisplayUint(st, 16);
++                        PrintStr(L" addr=0x");
++                        DisplayUint(*err_addr, 16);
++                        PrintStr(newline);
++                    } else {
++                        PrintStr(L"TEGRA234: CCPMU clean before ExitBootServices\r\n");
++                    }
++                }
++
+                 read_file(dir_handle, s2w(&name), &ramdisk, NULL);
+                 efi_bs->FreePool(name.w);
+             }
+@@ -1457,6 +1572,22 @@ void EFIAPI __init noreturn efi_start(EFI_HANDLE ImageHandle,
+             name.s = get_value(&cfg, section.s, "xsm");
+             if ( name.s )
+             {
++                /* TEGRA234 DEBUG: snapshot CCPMU RAS status just before ExitBootServices */
++                {
++                    volatile uint64_t *err_status = (volatile uint64_t *)0x0E001010UL;
++                    volatile uint64_t *err_addr   = (volatile uint64_t *)0x0E001018UL;
++                    uint64_t st = *err_status;
++                    if (st & (1ULL << 30)) { /* ERR0STATUS.V */
++                        PrintStr(L"TEGRA234: CCPMU ERR0STATUS.V set before ExitBootServices: 0x");
++                        DisplayUint(st, 16);
++                        PrintStr(L" addr=0x");
++                        DisplayUint(*err_addr, 16);
++                        PrintStr(newline);
++                    } else {
++                        PrintStr(L"TEGRA234: CCPMU clean before ExitBootServices\r\n");
++                    }
++                }
++
+                 read_file(dir_handle, s2w(&name), &xsm, NULL);
+                 efi_bs->FreePool(name.w);
+             }
+@@ -1554,6 +1685,20 @@ void EFIAPI __init noreturn efi_start(EFI_HANDLE ImageHandle,
+ 
+     efi_relocate_esrt(SystemTable);
+ 
++    {
++        volatile uint64_t *err_status = (volatile uint64_t *)0x0E001010UL;
++        volatile uint64_t *err_addr   = (volatile uint64_t *)0x0E001018UL;
++        uint64_t st = *err_status;
++        if (st & (1ULL << 30)) { /* ERR0STATUS.V */
++            PrintStr(L"TEGRA234: CCPMU ERR0STATUS.V set before ExitBootServices: 0x");
++            DisplayUint(st, 16);
++            PrintStr(L" addr=0x");
++            DisplayUint(*err_addr, 16);
++            PrintStr(newline);
++        } else {
++            PrintStr(L"TEGRA234: CCPMU clean before ExitBootServices\r\n");
++        }
++    }
+     efi_exit_boot(ImageHandle, SystemTable);
+ 
+     efi_arch_post_exit_boot(); /* Doesn't return. */

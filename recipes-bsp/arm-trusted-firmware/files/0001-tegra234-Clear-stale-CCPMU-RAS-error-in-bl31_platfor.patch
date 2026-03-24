@@ -1,0 +1,63 @@
+From ec36e4427f582824ad91d773e1623baae2ad7aef Mon Sep 17 00:00:00 2001
+From: Ahmed Wafdy <ahmedadelwafdy782@gmail.com>
+Date: Fri, 27 Feb 2026 21:54:38 +0000
+Subject: [PATCH] tegra234: Clear stale CCPMU RAS error in bl31_platform_setup
+
+Add an early CCPMU RAS error clear at the start of bl31_platform_setup()
+in tegra_bl31_setup.c, before SCR_EL3.EA is set to 1.
+
+When Xen is the bootloader, Jetson firmware leaves the CCPMU RAS node
+in a dirty state: ERR0STATUS.V=1 with ERR0ADDR=0xa5a5a5a5a5a5a5a5
+(firmware uninit poison pattern). Without this clear, the stale error
+fires as a spurious SError during ATF el3_exit ERET, gets routed to
+EL3 via SCR_EL3.EA=1, and hits assert(selected!=NULL) in
+tegra234_ras_handler() because the SDEI dispatch table is not yet
+populated by the time Xen calls ExitBootServices.
+
+The clear is placed as the very first action in bl31_platform_setup(),
+before plat_gic_setup() and before profiler timestamps, to ensure it
+runs before any code path that could trigger an SError.
+
+tegra_bl31_setup.c already includes <lib/mmio.h> and <arch_helpers.h>
+so no new includes are required beyond the two RAS headers.
+---
+ plat/nvidia/tegra/common/tegra_bl31_setup.c | 19 +++++++++++++++++++
+ 1 file changed, 19 insertions(+)
+
+diff --git a/plat/nvidia/tegra/common/tegra_bl31_setup.c b/plat/nvidia/tegra/common/tegra_bl31_setup.c
+index 25c04c0..d1616f6 100644
+--- a/plat/nvidia/tegra/common/tegra_bl31_setup.c
++++ b/plat/nvidia/tegra/common/tegra_bl31_setup.c
+@@ -22,6 +22,8 @@
+ #include <denver.h>
+ #include <drivers/console.h>
+ #include <lib/mmio.h>
++#include <lib/extensions/ras_arch.h>
++#include <tegra234_ras_private.h>
+ #include <lib/utils.h>
+ #include <lib/utils_def.h>
+ #include <plat/common/platform.h>
+@@ -233,6 +235,23 @@ void plat_trusty_set_boot_args(aapcs64_params_t *args)
+  ******************************************************************************/
+ void bl31_platform_setup(void)
+ {
++	{
++	      uint64_t ccpmu_status = mmio_read_64(TEGRA234_RAS_CCPMU_BASE + ERR_STATUS(0));
++	      uint64_t val = 0ULL;
++	      if (ERR_STATUS_GET_FIELD(ccpmu_status, V) != 0U){
++	         WARN("BL31: stale CCPMU RAS error at startup "
++		      "status=0x%" PRIx64 " addr=0x%" PRIx64 " clearing\n",
++		      ccpmu_status,
++		      mmio_read_64(TEGRA234_RAS_CCPMU_BASE + ERR_ADDR(0)));
++		 ERR_STATUS_SET_FIELD(val, V, 1);
++		 ERR_STATUS_SET_FIELD(val, AV, 1);
++		 mmio_write_64(TEGRA234_RAS_CCPMU_BASE + ERR_STATUS(0), val);
++		 mmio_write_64(TEGRA234_RAS_CCPMU_BASE + ERR_ADDR(0), 0ULL);
++		 dsbsy();
++		 isb();
++	      }      
++	}
++
+ 	/*
+ 	 * Add timestamp for platform setup entry.
+ 	 */

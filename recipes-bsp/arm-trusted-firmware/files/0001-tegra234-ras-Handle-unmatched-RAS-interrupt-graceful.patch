@@ -1,0 +1,79 @@
+From cabba8bc7e1b2ffe44e719c0dabc1da8d12d0fc7 Mon Sep 17 00:00:00 2001
+From: Ahmed Wafdy <ahmedadelwafdy782@gmail.com>
+Date: Fri, 27 Feb 2026 21:34:16 +0000
+Subject: [PATCH] tegra234: ras: Handle unmatched RAS interrupt gracefully for
+ Xen
+
+When Xen is the bootloader it does not invoke the NVIDIA UEFI
+ExitBootServices notification callback that completes SDEI handler
+registration. A spurious CCPMU SError (IERR=0x5 uCode, ADDR=0xa5a5...
+firmware poison pattern) fires during ATF el3_exit ERET because
+SCR_EL3.EA=1 (HANDLE_EA_EL3_FIRST_NS=1) routes all NS-EL2 SErrors
+to EL3.
+---
+ plat/nvidia/tegra/soc/t234/plat_ras.c | 31 ++++++++++++++++++++++++---
+ 1 file changed, 28 insertions(+), 3 deletions(-)
+
+diff --git a/plat/nvidia/tegra/soc/t234/plat_ras.c b/plat/nvidia/tegra/soc/t234/plat_ras.c
+index 0acf840..432fe39 100644
+--- a/plat/nvidia/tegra/soc/t234/plat_ras.c
++++ b/plat/nvidia/tegra/soc/t234/plat_ras.c
+@@ -204,6 +204,24 @@ static bool is_err_record_supported(struct err_record_info *record)
+ 	return true;
+ }
+ 
++static void tegra234_ras_clear_ccpm_stale(void)
++{
++  uint64_t status = mmio_read_64(TEGRA234_RAS_CCPMU_BASE + ERR_STATUS(0));
++  uint64_t val = 0ULL;
++  if (ERR_STATUS_GET_FIELD(status, V) != 0U){
++      WARN("tegra234: clearing stale CCPMU RAS error "
++           "status=0x%llx addr=0x%llx\n",
++	  (unsigned long long)status,
++          (unsigned long long)mmio_read_64(TEGRA234_RAS_CCPMU_BASE + ERR_ADDR(0)));
++      ERR_STATUS_SET_FIELD(val, V, 1);
++      ERR_STATUS_SET_FIELD(val, AV, 1);
++      mmio_write_64(TEGRA234_RAS_CCPMU_BASE + ERR_STATUS(0), val);
++      mmio_write_64(TEGRA234_RAS_CCPMU_BASE + ERR_ADDR(0), 0ULL);
++      dsbsy();
++      isb();
++  }
++}	
++
+ /*******************************************************************************
+  * Error handling functions
+  ******************************************************************************/
+@@ -392,7 +410,7 @@ static int tegra234_ras_handler(uint32_t intr_raw, uint32_t flags,
+ 	uint64_t intr_status = ih_read_ras_intstatus(plat_my_core_pos());
+ 	struct err_record_info *selected = NULL;
+ 	int probe_data = 0;
+-	int ret;
++	int ret = 0;
+ 	uint32_t num_records = 0U;
+ 	bool system_is_not_recoverable = false;
+ 
+@@ -427,7 +445,12 @@ static int tegra234_ras_handler(uint32_t intr_raw, uint32_t flags,
+ 		num_records = ARRAY_SIZE(tegra234_ras_records_cluster2);
+ 	}
+ 
+-	assert(selected != NULL);
++	if (selected == NULL){
++	   WARN("tegra234: ras_handler: unmatched intr_status=0x%llx,"
++	        " clearing stale CCPMU error\n", (unsigned long long)intr_status);
++	   tegra234_ras_clear_ccpm_stale();
++           return 0;	   
++	}
+ 
+ 	/* check all the error records */
+ 	while (num_records-- > 0U) {
+@@ -470,7 +493,9 @@ static int tegra234_ras_handler(uint32_t intr_raw, uint32_t flags,
+ 			ret = sdei_dispatch_event(TEGRA_SDEI_EP_EVENT_0 +
+ 				plat_my_core_pos());
+ 			if (ret != 0)
+-				ERROR("sdei_dispatch_event returned %d\n", ret);
++				WARN("sdei_dispatch_event returned %d"
++				     " (SDEI may not be registered yet)\n",
++			             ret);	     
+ 		}
+ 
+ 		/* next error record */

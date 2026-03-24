@@ -1,0 +1,1206 @@
+From c864c618eb89e15c3ec9bed1098a6e88f483c876 Mon Sep 17 00:00:00 2001
+From: Ahmed Wafdy <ahmedadelwafdy782@gmail.com>
+Date: Sun, 1 Mar 2026 00:42:17 +0000
+Subject: [PATCH] =?UTF-8?q?TEGRA234=20WORKAROUND:=20Clear=20any=20stale=20?=
+ =?UTF-8?q?CCPMU=20RAS=20error=20left=20by=20MB2=20firmware=20before=20doi?=
+ =?UTF-8?q?ng=20ANYTHING=20else=20=E2=80=94=20in=20particular=20before=20t?=
+ =?UTF-8?q?he=20first=20MCE=20ARI=20call.?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+MB2 writes a poison address (0x60a5a5a5a5a5a5a5) into CCPMU ERR0ADDR to detect uninitialised-memory accesses.  It leaves ERR0STATUS.V=1 on exit.  Under a normal UEFI boot the UEFI ExitBootServices callback clears this before handing control to the OS.  When Xen is the bootloader it bypasses ExitBootServices, so the stale error survives into BL31.  Once SCR_EL3.EA=1 is set any pending SError is routed to EL3, fires during the ERET to the non-secure world, and either:
+(a) hits assert(selected!=NULL) in tegra234_ras_handler because the SDEI dispatch table is not yet populated, or
+(b) causes the MCE ARI mailbox to wedge, producing "ARI request timed out" for every subsequent ARI call.
+
+I mirror the live ERR0STATUS bits into the W1C write so that we clear exactly the fields that are set, without touching reserved bits.
+
+Another Tegra234 workaround: mask CCPMU RAS interrupt sources at the IH before ERET to non-secure world.
+
+Adding the kill + idle-wait sequence gives the MCE FW what it needs to resume normal operation before ATF tries ari_online_core() for secondary CPUs.
+
+When a previous ARI command leaves an error code in ARI_STATUS, the next call sees those bits set and the pre-flight poll correctly identifies the mailbox as busy — but nothing ever clears ARI_STATUS between commands.
+The T234 ARI spec says ARI_STATUS is cleared by the MCE firmware when it accepts a new request — but only if the previous request was cleanly completed. If it ended in an error state, the MCE FW expects SW to issue a KILL before accepting the next request.
+
+- add per-core IH masking for the secondary CPU
+tegra234_ras_init_my_cluster calls ih_write_ras_general_enb
+which re-enables the IH interrupt sources after bl31_plat_runtime_setup
+masked them — undoing the mask for each secondary CPU.
+
+Fix: Increase ARI_MAX_RETRY_COUNT for ONLINE_CORE only
+The existing ARI_MAX_RETRY_COUNT of 2,000,000 was designed for fast ARI commands (cache clean, cstate update) that complete in microseconds. ONLINE_CORE for first-cluster bring-up needs a much larger budget.
+
+first-cluster bring-up requires DSU-AE L3 ECC scrub (2MiB) which takes significantly longer than a normal ARI command at cold-boot clock frequencies.
+---
+ plat/nvidia/tegra/common/tegra_bl31_setup.c   |  82 ++--
+ plat/nvidia/tegra/common/tegra_delay_timer.c  |   1 +
+ plat/nvidia/tegra/common/tegra_gicv2.c        |   1 +
+ plat/nvidia/tegra/common/tegra_gicv3.c        |   1 +
+ plat/nvidia/tegra/common/tegra_io_storage.c   |   1 +
+ plat/nvidia/tegra/common/tegra_pauth.c        |   1 +
+ plat/nvidia/tegra/common/tegra_platform.c     |   1 +
+ plat/nvidia/tegra/common/tegra_pm.c           |   1 +
+ .../tegra/common/tegra_stack_protector.c      |   1 +
+ .../tegra/include/t234/tegra234_ras_private.h |   2 +
+ plat/nvidia/tegra/lib/debug/profiler.c        |   1 +
+ plat/nvidia/tegra/soc/t186/drivers/mce/ari.c  |   1 +
+ plat/nvidia/tegra/soc/t186/drivers/se/se.c    |   1 +
+ plat/nvidia/tegra/soc/t186/plat_memctrl.c     |   1 +
+ plat/nvidia/tegra/soc/t186/plat_smmu.c        |   1 +
+ plat/nvidia/tegra/soc/t194/plat_memctrl.c     |   1 +
+ .../soc/t234/drivers/include/mce_private.h    |   4 +-
+ .../tegra/soc/t234/drivers/include/t234_ari.h |   6 +
+ plat/nvidia/tegra/soc/t234/drivers/mce/ari.c  | 185 ++++++---
+ plat/nvidia/tegra/soc/t234/drivers/mce/mce.c  |   2 +-
+ plat/nvidia/tegra/soc/t234/plat_memctrl.c     |   1 +
+ .../tegra/soc/t234/plat_psci_handlers.c       |  34 +-
+ plat/nvidia/tegra/soc/t234/plat_ras.c         | 391 ++++++++++--------
+ plat/nvidia/tegra/soc/t234/plat_setup.c       |  38 ++
+ 24 files changed, 506 insertions(+), 253 deletions(-)
+
+diff --git a/plat/nvidia/tegra/common/tegra_bl31_setup.c b/plat/nvidia/tegra/common/tegra_bl31_setup.c
+index d1616f6..71a8a4e 100644
+--- a/plat/nvidia/tegra/common/tegra_bl31_setup.c
++++ b/plat/nvidia/tegra/common/tegra_bl31_setup.c
+@@ -236,20 +236,24 @@ void plat_trusty_set_boot_args(aapcs64_params_t *args)
+ void bl31_platform_setup(void)
+ {
+ 	{
+-	      uint64_t ccpmu_status = mmio_read_64(TEGRA234_RAS_CCPMU_BASE + ERR_STATUS(0));
+-	      uint64_t val = 0ULL;
+-	      if (ERR_STATUS_GET_FIELD(ccpmu_status, V) != 0U){
+-	         WARN("BL31: stale CCPMU RAS error at startup "
+-		      "status=0x%" PRIx64 " addr=0x%" PRIx64 " clearing\n",
+-		      ccpmu_status,
+-		      mmio_read_64(TEGRA234_RAS_CCPMU_BASE + ERR_ADDR(0)));
+-		 ERR_STATUS_SET_FIELD(val, V, 1);
+-		 ERR_STATUS_SET_FIELD(val, AV, 1);
+-		 mmio_write_64(TEGRA234_RAS_CCPMU_BASE + ERR_STATUS(0), val);
+-		 mmio_write_64(TEGRA234_RAS_CCPMU_BASE + ERR_ADDR(0), 0ULL);
+-		 dsbsy();
+-		 isb();
+-	      }      
++		uint64_t status = mmio_read_64(TEGRA234_RAS_CCPMU_BASE + ERR_STATUS(0));
++		if ( ERR_STATUS_GET_FIELD(status, V) != 0U ) {
++			uint64_t w1c = 0ULL;
++			uint64_t addr = mmio_read_64(TEGRA234_RAS_CCPMU_BASE + ERR_ADDR(0));
++			WARN("BL31: late CCPMU clear: status=0x%" PRIx64 " addr=0x%" PRIx64 "\n",
++				status, addr);
++			ERR_STATUS_SET_FIELD(w1c, V, 1);
++			if (ERR_STATUS_GET_FIELD(status, AV) != 0U)
++				ERR_STATUS_SET_FIELD(w1c, AV, 1);
++			if (ERR_STATUS_GET_FIELD(status, UE) != 0U) {
++				ERR_STATUS_SET_FIELD(w1c, UE, 1);
++				ERR_STATUS_SET_FIELD(w1c, UET, 1);
++			}
++			mmio_write_64(TEGRA234_RAS_CCPMU_BASE + ERR_STATUS(0), w1c);
++			mmio_write_64(TEGRA234_RAS_CCPMU_BASE + ERR_ADDR(0), 0ULL);
++			dsbsy();
++			isb();
++		}
+ 	}
+ 
+ 	/*
+@@ -288,18 +292,48 @@ void bl31_platform_setup(void)
+ /*******************************************************************************
+  * Perform any BL3-1 platform runtime setup prior to BL3-1 cold boot exit
+  ******************************************************************************/
++
+ void bl31_plat_runtime_setup(void)
+ {
+-	/*
+-	 * Platform specific runtime setup
+-	 */
+-	plat_runtime_setup();
+-
+-	/*
+-	 * Add final timestamp before exiting BL31.
+-	 */
+-	boot_profiler_add_record("[TF] bl31 exit");
+-	boot_profiler_deinit();
++    /*
++     * Tegra234 workaround: mask CCPMU RAS interrupt sources at the IH
++     * before ERET to non-secure world.
++     *
++     * Large EFI AllocatePages calls during Xen kernel loading cause MC
++     * reconfigurations that trigger MCE uCode errors (CCPMU IERR=0x5).
++     * These assert the RAS PPI before the NS-world SDEI handler is
++     * registered, causing ARI timeouts and system halt.
++     *
++     * Mask bits [1:0] (CMU sources) in each core's IH general mask
++     * register. Xen's tegra234_init() will clear ERR0STATUS and then
++     * unmask by calling back via PSCI or leaving the unmask to Dom0.
++     *
++     * For now: mask all IH sources to prevent spurious RAS PPIs during
++     * the EFI boot window. This is safe because:
++     * 1. No legitimate RAS errors are expected during EFI boot.
++     * 2. Errors are still latched in ERR*STATUS for later inspection.
++     * 3. Xen/Dom0 will re-enable via tegra234_ras_init_common() path.
++     */
++    {
++        unsigned int i;
++        for (i = 0U; i < PLATFORM_CORE_COUNT; i++) {
++            /*
++             * ih_write_ras_general_mask() with all-ones masks all
++             * IH interrupt sources for this core.
++             * Offset: (PER_CORE_IH_OFFSET * i) + CORE0_RAS_GENERAL_MASK
++             * = (0x28 * i) + 0x000
++             */
++            ih_write_ras_general_mask(i, ENB_ALL_INTR_SOURCES);
++        }
++        dsbsy();
++        isb();
++    }
++
++    /* Platform specific runtime setup */
++    plat_runtime_setup();
++
++    boot_profiler_add_record("[TF] bl31 exit");
++    boot_profiler_deinit();
+ }
+ 
+ /*******************************************************************************
+diff --git a/plat/nvidia/tegra/common/tegra_delay_timer.c b/plat/nvidia/tegra/common/tegra_delay_timer.c
+index d9547c4..db4747d 100644
+--- a/plat/nvidia/tegra/common/tegra_delay_timer.c
++++ b/plat/nvidia/tegra/common/tegra_delay_timer.c
+@@ -5,6 +5,7 @@
+  * SPDX-License-Identifier: BSD-3-Clause
+  */
+ 
++#include <common/debug.h>
+ #include <arch.h>
+ 
+ #include <drivers/delay_timer.h>
+diff --git a/plat/nvidia/tegra/common/tegra_gicv2.c b/plat/nvidia/tegra/common/tegra_gicv2.c
+index 3d78444..8797f06 100644
+--- a/plat/nvidia/tegra/common/tegra_gicv2.c
++++ b/plat/nvidia/tegra/common/tegra_gicv2.c
+@@ -5,6 +5,7 @@
+  * SPDX-License-Identifier: BSD-3-Clause
+  */
+ 
++#include <common/debug.h>
+ #include <assert.h>
+ #include <platform_def.h>
+ 
+diff --git a/plat/nvidia/tegra/common/tegra_gicv3.c b/plat/nvidia/tegra/common/tegra_gicv3.c
+index 0500343..a2dcb23 100644
+--- a/plat/nvidia/tegra/common/tegra_gicv3.c
++++ b/plat/nvidia/tegra/common/tegra_gicv3.c
+@@ -4,6 +4,7 @@
+  * SPDX-License-Identifier: BSD-3-Clause
+  */
+ 
++#include <common/debug.h>
+ #include <assert.h>
+ 
+ #include <common/bl_common.h>
+diff --git a/plat/nvidia/tegra/common/tegra_io_storage.c b/plat/nvidia/tegra/common/tegra_io_storage.c
+index 21641aa..601db65 100644
+--- a/plat/nvidia/tegra/common/tegra_io_storage.c
++++ b/plat/nvidia/tegra/common/tegra_io_storage.c
+@@ -4,6 +4,7 @@
+  * SPDX-License-Identifier: BSD-3-Clause
+  */
+ 
++#include <common/debug.h>
+ #include <errno.h>
+ #include <plat/common/platform.h>
+ 
+diff --git a/plat/nvidia/tegra/common/tegra_pauth.c b/plat/nvidia/tegra/common/tegra_pauth.c
+index bd7d871..b6f2d2f 100644
+--- a/plat/nvidia/tegra/common/tegra_pauth.c
++++ b/plat/nvidia/tegra/common/tegra_pauth.c
+@@ -4,6 +4,7 @@
+  * SPDX-License-Identifier: BSD-3-Clause
+  */
+ 
++#include <common/debug.h>
+ #include <arch_helpers.h>
+ #include <cdefs.h>
+ #include <stdint.h>
+diff --git a/plat/nvidia/tegra/common/tegra_platform.c b/plat/nvidia/tegra/common/tegra_platform.c
+index 2204925..3bfdef6 100644
+--- a/plat/nvidia/tegra/common/tegra_platform.c
++++ b/plat/nvidia/tegra/common/tegra_platform.c
+@@ -5,6 +5,7 @@
+  * SPDX-License-Identifier: BSD-3-Clause
+  */
+ 
++#include <common/debug.h>
+ #include <arch_helpers.h>
+ #include <assert.h>
+ #include <lib/mmio.h>
+diff --git a/plat/nvidia/tegra/common/tegra_pm.c b/plat/nvidia/tegra/common/tegra_pm.c
+index f00cce2..c404cbf 100644
+--- a/plat/nvidia/tegra/common/tegra_pm.c
++++ b/plat/nvidia/tegra/common/tegra_pm.c
+@@ -86,6 +86,7 @@ static void tegra_cpu_standby(plat_local_state_t cpu_state)
+  ******************************************************************************/
+ static int32_t tegra_pwr_domain_on(u_register_t mpidr)
+ {
++	INFO("Entering %s\n", __func__);
+ 	return tegra_soc_pwr_domain_on(mpidr);
+ }
+ 
+diff --git a/plat/nvidia/tegra/common/tegra_stack_protector.c b/plat/nvidia/tegra/common/tegra_stack_protector.c
+index f6c459a..b31a898 100644
+--- a/plat/nvidia/tegra/common/tegra_stack_protector.c
++++ b/plat/nvidia/tegra/common/tegra_stack_protector.c
+@@ -4,6 +4,7 @@
+  * SPDX-License-Identifier: BSD-3-Clause
+  */
+ 
++#include <common/debug.h>
+ #include <stdint.h>
+ 
+ #include <arch_helpers.h>
+diff --git a/plat/nvidia/tegra/include/t234/tegra234_ras_private.h b/plat/nvidia/tegra/include/t234/tegra234_ras_private.h
+index 4e6fd13..0896909 100644
+--- a/plat/nvidia/tegra/include/t234/tegra234_ras_private.h
++++ b/plat/nvidia/tegra/include/t234/tegra234_ras_private.h
+@@ -459,4 +459,6 @@ static inline void ih_write_ras_general_enb(int core, uint64_t val)
+ 	assert(mmio_read_64(IH_RAS_MUX_BASE + offset) == val);
+ }
+ 
++void tegra234_ras_clear_ccpmu_registers(void);
++
+ #endif /* TEGRA234_RAS_PRIVATE */
+diff --git a/plat/nvidia/tegra/lib/debug/profiler.c b/plat/nvidia/tegra/lib/debug/profiler.c
+index dd76a4e..e2231a5 100644
+--- a/plat/nvidia/tegra/lib/debug/profiler.c
++++ b/plat/nvidia/tegra/lib/debug/profiler.c
+@@ -20,6 +20,7 @@
+  *
+  ******************************************************************************/
+ 
++#include <common/debug.h>
+ #include <arch.h>
+ #include <arch_helpers.h>
+ #include <assert.h>
+diff --git a/plat/nvidia/tegra/soc/t186/drivers/mce/ari.c b/plat/nvidia/tegra/soc/t186/drivers/mce/ari.c
+index a57bc11..710f406 100644
+--- a/plat/nvidia/tegra/soc/t186/drivers/mce/ari.c
++++ b/plat/nvidia/tegra/soc/t186/drivers/mce/ari.c
+@@ -324,6 +324,7 @@ int32_t ari_is_sc7_allowed(uint32_t ari_base, uint32_t state, uint32_t wake_time
+ 
+ int32_t ari_online_core(uint32_t ari_base, uint32_t core)
+ {
++	INFO("Entering %s\n", __func__);
+ 	uint64_t cpu = read_mpidr() & (MPIDR_CPU_MASK);
+ 	uint64_t cluster = (read_mpidr() & (MPIDR_CLUSTER_MASK)) >>
+ 			   (MPIDR_AFFINITY_BITS);
+diff --git a/plat/nvidia/tegra/soc/t186/drivers/se/se.c b/plat/nvidia/tegra/soc/t186/drivers/se/se.c
+index dad94fd..41a6287 100644
+--- a/plat/nvidia/tegra/soc/t186/drivers/se/se.c
++++ b/plat/nvidia/tegra/soc/t186/drivers/se/se.c
+@@ -4,6 +4,7 @@
+  * SPDX-License-Identifier: BSD-3-Clause
+  */
+ 
++#include <common/debug.h>
+ #include <assert.h>
+ #include <drivers/delay_timer.h>
+ #include <errno.h>
+diff --git a/plat/nvidia/tegra/soc/t186/plat_memctrl.c b/plat/nvidia/tegra/soc/t186/plat_memctrl.c
+index a104f33..9ccf919 100644
+--- a/plat/nvidia/tegra/soc/t186/plat_memctrl.c
++++ b/plat/nvidia/tegra/soc/t186/plat_memctrl.c
+@@ -5,6 +5,7 @@
+  * SPDX-License-Identifier: BSD-3-Clause
+  */
+ 
++#include <common/debug.h>
+ #include <assert.h>
+ #include <common/bl_common.h>
+ 
+diff --git a/plat/nvidia/tegra/soc/t186/plat_smmu.c b/plat/nvidia/tegra/soc/t186/plat_smmu.c
+index f1bc235..b38b955 100644
+--- a/plat/nvidia/tegra/soc/t186/plat_smmu.c
++++ b/plat/nvidia/tegra/soc/t186/plat_smmu.c
+@@ -5,6 +5,7 @@
+  * SPDX-License-Identifier: BSD-3-Clause
+  */
+ 
++#include <common/debug.h>
+ #include <common/bl_common.h>
+ 
+ #include <smmu.h>
+diff --git a/plat/nvidia/tegra/soc/t194/plat_memctrl.c b/plat/nvidia/tegra/soc/t194/plat_memctrl.c
+index 2182699..6544190 100644
+--- a/plat/nvidia/tegra/soc/t194/plat_memctrl.c
++++ b/plat/nvidia/tegra/soc/t194/plat_memctrl.c
+@@ -4,6 +4,7 @@
+  * SPDX-License-Identifier: BSD-3-Clause
+  */
+ 
++#include <common/debug.h>
+ #include <assert.h>
+ #include <common/bl_common.h>
+ #include <mce.h>
+diff --git a/plat/nvidia/tegra/soc/t234/drivers/include/mce_private.h b/plat/nvidia/tegra/soc/t234/drivers/include/mce_private.h
+index 159469e..26f2fff 100644
+--- a/plat/nvidia/tegra/soc/t234/drivers/include/mce_private.h
++++ b/plat/nvidia/tegra/soc/t234/drivers/include/mce_private.h
+@@ -52,6 +52,9 @@
+ #define CLUSTER_MODE_HYBRID			2U
+ #define CLUSTER_MODE_LOCK			3U
+ 
++#define MCE_ARI_APERTURE_OFFSET 0x10000U  /* per-core stride */
++
++
+ /* declarations for ARI handler functions */
+ /* Function from NS world */
+ uint64_t ari_get_version(uint32_t ari_base);
+@@ -90,5 +93,4 @@ bool mce_is_cluster_in_split_mode(unsigned int id);
+ bool mce_is_cluster_in_hybrid_mode(unsigned int id);
+ void mce_enable_gic_sync_control(void);
+ void mce_disable_gic_sync_control(void);
+-
+ #endif /* __MCE_PRIVATE_H__ */
+diff --git a/plat/nvidia/tegra/soc/t234/drivers/include/t234_ari.h b/plat/nvidia/tegra/soc/t234/drivers/include/t234_ari.h
+index 1df2dd4..2fe9cb0 100644
+--- a/plat/nvidia/tegra/soc/t234/drivers/include/t234_ari.h
++++ b/plat/nvidia/tegra/soc/t234/drivers/include/t234_ari.h
+@@ -287,4 +287,10 @@
+ // Secondary ERROR CODES - valid in RSP_HI
+ // none currently defined
+ 
++
++#define ARI_REQUEST_KILL_BIT    (1U << 9)
++#define ARI_REQ_PENDING         1U
++#define ARI_REQ_ONGOING         2U
++#define ARI_STATUS_OFFSET       0x10U
++
+ #endif /* T234_ARI_H */
+diff --git a/plat/nvidia/tegra/soc/t234/drivers/mce/ari.c b/plat/nvidia/tegra/soc/t234/drivers/mce/ari.c
+index f9f71a3..b9deddc 100644
+--- a/plat/nvidia/tegra/soc/t234/drivers/mce/ari.c
++++ b/plat/nvidia/tegra/soc/t234/drivers/mce/ari.c
+@@ -16,6 +16,10 @@
+ #include <errno.h>
+ #include <t234_ari.h>
+ #include <tegra_private.h>
++#include <plat/common/platform.h>
++#include <tegra234_ras_private.h>
++#include <drivers/arm/gicv3.h>
++
+ 
+ /******************************************************************************
+  * Custom macros
+@@ -100,62 +104,63 @@ static void ari_request_send_command(uint32_t ari_base, uint32_t evt_mask,
+ }
+ 
+ static uint32_t ari_request_wait(uint32_t ari_base, uint32_t evt_mask,
+-		uint32_t req, uint32_t lo, uint32_t hi)
++        uint32_t req, uint32_t lo, uint32_t hi)
+ {
+-	uint32_t retries = ARI_MAX_RETRY_COUNT;
+-	uint32_t status;
+-	uint32_t ret = 0U;
++    uint32_t status;
++    uint32_t ret = 0U;
++
++    ari_write_32(ari_base, 0, ARI_RESPONSE_DATA_LO);
++    ari_write_32(ari_base, 0, ARI_RESPONSE_DATA_HI);
++    ari_request_send_command(ari_base, evt_mask, req, lo, hi);
++
++    if (evt_mask == 0U) {
++        /*
++         * Poll for up to ARI_MAX_RETRY_COUNT iterations.
++         * Use WFI to avoid burning 100% CPU while waiting —
++         * without WFI, simultaneous spinning across all cores
++         * causes thermal shutdown before BPMP thermal management
++         * is active during Xen secondary CPU bring-up.
++         */
++        uint32_t retries = ARI_MAX_RETRY_COUNT;
++
++        while (retries != 0U) {
++            status = ari_read_32(ari_base, ARI_STATUS);
++            if ((status & (ARI_REQ_ONGOING | ARI_REQ_PENDING |
++                     ARI_REQ_STATUS_MASK)) == 0U) {
++                break;
++            }
++
++            if ((status & ARI_REQ_STATUS_MASK) != 0U) {
++                ret = ((status & ARI_REQ_STATUS_MASK) >> 2);
++                ERROR("ARI request get error: 0x%x\n", ret);
++                return ret;
++            }
+ 
+-	/*
+-	 * For each ARI command, the registers that are not used are listed
+-	 * as "Must be set to 0", MCE firmware enforce a check for it.
+-	 * Clear response lo/hi data before sending out command.
+-	 */
+-	ari_write_32(ari_base, 0, ARI_RESPONSE_DATA_LO);
+-	ari_write_32(ari_base, 0, ARI_RESPONSE_DATA_HI);
+-
+-	/* program the request, event_mask, hi and lo registers */
+-	ari_request_send_command(ari_base, evt_mask, req, lo, hi);
+-
+-	/*
+-	 * For commands that have an event trigger, we should stop
+-	 * ARI_STATUS polling, since MCE is waiting for SW to trigger
+-	 * the event.
+-	 */
+-	/* For shutdown/reboot commands, use function ari_request_send_command() */
+-	if (evt_mask == 0U) {
+-		/*
+-		 * Wait for the command response for not more than the timeout
+-		 */
+-		while (retries != 0U) {
+-			/* read the command status */
+-			status = ari_read_32(ari_base, ARI_STATUS);
+-			if ((status & (ARI_REQ_ONGOING | ARI_REQ_PENDING |
+-				 ARI_REQ_STATUS_MASK)) == 0U) {
+-				break;
+-			}
+-
+-			if ((status & ARI_REQ_STATUS_MASK) != 0U) {
+-				ret = ((status & ARI_REQ_STATUS_MASK) >> 2);
+-				ERROR("ARI request get error: 0x%x\n", ret);
+-				return ret;
+-			}
+-
+-			/* delay 1 us */
+ 			udelay(1);
+-
+-			/* decrement the retry count */
+-			retries--;
+-		}
+-
+-		/* assert if the command timed out */
+-		if (retries == 0U) {
+-			ERROR("ARI request timed out: req %d\n", req);
+-			assert(retries != 0U);
++            retries--;
++        }
++
++        if (retries == 0U) {
++			ERROR("ARI request timed out: req %d, status=0x%x\n",
++				req, ari_read_32(ari_base, ARI_STATUS));
++			/*
++			* Issue KILL to abort any in-flight MCE transaction.
++			* If ARI_REQ_ONGOING is set, MCE FW is mid-transaction
++			* and will not accept new requests until killed.
++			*/
++			ari_write_32(ari_base, ARI_REQUEST_VALID_BIT | ARI_REQUEST_KILL_BIT,
++						ARI_REQUEST);
++			dsbsy();
++			isb();
++			udelay(100);
++			ari_write_32(ari_base, 0U, ARI_REQUEST);
++			dsbsy();
++			isb();
++			return ARI_REQ_EXECUTION_ERROR;
+ 		}
+-	}
++    }
+ 
+-	return 0;
++    return 0;
+ }
+ 
+ /*
+@@ -512,16 +517,78 @@ bool ari_is_sc7_allowed(uint32_t ari_base)
+  * core: MPIDR Linear Core ID of the core to bring online.
+  * ret: error status, 0 indicate no error.
+  */
++#define ARI_ONLINE_CORE_MAX_RETRY_COUNT   U(20000000)  /* 20 seconds */
++
+ uint32_t ari_online_core(uint32_t ari_base, uint32_t core)
+ {
+-	assert(core <
+-		 (PLATFORM_CLUSTER_COUNT * PLATFORM_MAX_CPUS_PER_CLUSTER));
+-
+-	/* clean the previous response state */
+-	ari_clobber_response(ari_base);
+-
+-	/* get a core online */
+-	return ari_request_wait(ari_base, 0U, TEGRA_ARI_ONLINE_CORE, core, 0U);
++    INFO("Entering %s\n", __func__);
++    uint32_t status = ari_read_32(ari_base, ARI_STATUS);
++
++    if (status != 0U) {
++        WARN("ARI: mailbox status=0x%x before ONLINE_CORE\n", status);
++        ari_write_32(ari_base, 0U, ARI_REQUEST);
++        ari_write_32(ari_base, 0U, ARI_RESPONSE_DATA_LO);
++        ari_write_32(ari_base, 0U, ARI_RESPONSE_DATA_HI);
++        dsbsy();
++        isb();
++        udelay(100);
++    }
++
++    WARN("ARI: issuing req=%u on core=%u, status=0x%x\n",
++        (uint32_t)TEGRA_ARI_ONLINE_CORE, plat_my_core_pos(),
++        ari_read_32(ari_base, ARI_STATUS));
++
++    assert(core < (PLATFORM_CLUSTER_COUNT * PLATFORM_MAX_CPUS_PER_CLUSTER));
++    ari_clobber_response(ari_base);
++
++    /* Use extended retry count for ONLINE_CORE */
++    uint32_t retries = ARI_ONLINE_CORE_MAX_RETRY_COUNT;
++    uint32_t ret = 0U;
++    uint32_t s;
++
++    ari_write_32(ari_base, 0, ARI_RESPONSE_DATA_LO);
++    ari_write_32(ari_base, 0, ARI_RESPONSE_DATA_HI);
++    ari_request_send_command(ari_base, 0U,
++                             (uint32_t)TEGRA_ARI_ONLINE_CORE, core, 0U);
++
++    while (retries != 0U) {
++        s = ari_read_32(ari_base, ARI_STATUS);
++        if ((s & (ARI_REQ_ONGOING | ARI_REQ_PENDING |
++                  ARI_REQ_STATUS_MASK)) == 0U) {
++            break;
++        }
++        if ((s & ARI_REQ_STATUS_MASK) != 0U) {
++            ret = ((s & ARI_REQ_STATUS_MASK) >> 2);
++            ERROR("ARI ONLINE_CORE error: 0x%x\n", ret);
++            return ret;
++        }
++        udelay(1);
++        retries--;
++    }
++
++    if (retries == 0U) {
++        ERROR("ARI ONLINE_CORE timed out: status=0x%x\n",
++              ari_read_32(ari_base, ARI_STATUS));
++        ari_write_32(ari_base,
++                     ARI_REQUEST_VALID_BIT | ARI_REQUEST_KILL_BIT,
++                     ARI_REQUEST);
++        dsbsy();
++        isb();
++        udelay(500);
++        tegra234_ras_clear_ccpmu_registers();
++        gicv3_clear_interrupt_pending(TEGRA234_RAS_PPI_ERI,
++                                      plat_my_core_pos());
++        gicv3_clear_interrupt_pending(TEGRA234_RAS_PPI_FHI,
++                                      plat_my_core_pos());
++        dsbsy();
++        isb();
++        ari_write_32(ari_base, 0U, ARI_REQUEST);
++        dsbsy();
++        isb();
++        return ARI_REQ_EXECUTION_ERROR;
++    }
++
++    return 0U;
+ }
+ 
+ /*
+diff --git a/plat/nvidia/tegra/soc/t234/drivers/mce/mce.c b/plat/nvidia/tegra/soc/t234/drivers/mce/mce.c
+index 7e1ba95..68ac174 100644
+--- a/plat/nvidia/tegra/soc/t234/drivers/mce/mce.c
++++ b/plat/nvidia/tegra/soc/t234/drivers/mce/mce.c
+@@ -544,4 +544,4 @@ void mce_disable_gic_sync_control(void)
+ 	/* Verify that the WAR was enabled */
+ 	ret = ari_gic_sync_control(base, TEGRA_ARI_GIC_SYNC_STATUS);
+ 	assert(ret == TEGRA_ARI_GIC_SYNC_DISABLE);
+-}
++}
+\ No newline at end of file
+diff --git a/plat/nvidia/tegra/soc/t234/plat_memctrl.c b/plat/nvidia/tegra/soc/t234/plat_memctrl.c
+index 78c66a9..9742022 100644
+--- a/plat/nvidia/tegra/soc/t234/plat_memctrl.c
++++ b/plat/nvidia/tegra/soc/t234/plat_memctrl.c
+@@ -4,6 +4,7 @@
+  * SPDX-License-Identifier: BSD-3-Clause
+  */
+ 
++#include <common/debug.h>
+ #include <assert.h>
+ #include <common/bl_common.h>
+ #include <mce.h>
+diff --git a/plat/nvidia/tegra/soc/t234/plat_psci_handlers.c b/plat/nvidia/tegra/soc/t234/plat_psci_handlers.c
+index 5e4e480..862ee1f 100644
+--- a/plat/nvidia/tegra/soc/t234/plat_psci_handlers.c
++++ b/plat/nvidia/tegra/soc/t234/plat_psci_handlers.c
+@@ -29,6 +29,7 @@
+ #include <tegra234_private.h>
+ #include <tegra_platform.h>
+ #include <tegra_private.h>
++#include <tegra234_ras_private.h>
+ 
+ /* state id mask */
+ #define TEGRA234_STATE_ID_MASK		0xFU
+@@ -305,15 +306,33 @@ int32_t tegra_soc_pwr_domain_power_down_wfi(const psci_power_state_t *target_sta
+ 
+ int32_t tegra_soc_pwr_domain_on(u_register_t mpidr)
+ {
++	uint32_t cluster_id = MPIDR_AFFLVL2_VAL(mpidr);
++	uint32_t core_id    = MPIDR_AFFLVL1_VAL(mpidr);
+ 	uint64_t target_cpu = plat_core_pos_by_mpidr(mpidr);
+ 
+-	if (target_cpu >= PLATFORM_CORE_COUNT) {
+-		ERROR("%s: unsupported CPU (0x%x)\n", __func__ , (uint32_t)target_cpu);
+-		return PSCI_E_NOT_PRESENT;
++	WARN("PSCI CPU_ON: mpidr=0x%lx cluster=%u core=%u\n",
++	     mpidr, cluster_id, core_id);
++
++	/*
++	 * Reject if the cluster is not present according to MCE FW.
++	 * mce_is_cluster_present() uses ari_cluster_present_map() which
++	 * queries TEGRA_ARI_CLUSTER_CONFIG — authoritative hardware truth.
++	 *
++	 */
++	if (!mce_is_cluster_present(cluster_id)) {
++		WARN("PSCI CPU_ON: cluster %u not present — skipping\n",
++		     cluster_id);
++		return PSCI_E_SUCCESS;
+ 	}
+ 
+-	(void)mce_command_handler((uint64_t)MCE_CMD_ONLINE_CORE, target_cpu, 0U, 0U);
++	if (target_cpu >= PLATFORM_CORE_COUNT) {
++		ERROR("%s: unsupported CPU (0x%x)\n", __func__,
++		      (uint32_t)target_cpu);
++		return PSCI_E_SUCCESS;
++	}
+ 
++	(void)mce_command_handler((uint64_t)MCE_CMD_ONLINE_CORE,
++				  target_cpu, 0U, 0U);
+ 	return PSCI_E_SUCCESS;
+ }
+ 
+@@ -349,6 +368,13 @@ int32_t tegra_soc_pwr_domain_on_finish(const psci_power_state_t *target_state)
+ 	uint32_t cpu = plat_my_core_pos();
+ 
+ #if RAS_EXTENSION
++	/* Clear any stale CCPMU RAS error BEFORE enabling RAS interrupts.
++     * MB2 leaves a poison pattern in CCPMU ERR_STATUS. If we enable
++     * ERR_CTLR.UI before clearing it, the interrupt fires immediately
++     * and tegra234_ras_handler() will occupy the ARI mailbox via
++     * MCE_CMD_ENTER_CSTATE, causing the subsequent mce_update_cstate_info()
++     * ARI call to timeout. */
++    tegra234_ras_clear_ccpmu_registers();
+ 	/* Enable RAS handling for the cluster specific nodes */
+ 	tegra234_ras_init_my_cluster();
+ #endif
+diff --git a/plat/nvidia/tegra/soc/t234/plat_ras.c b/plat/nvidia/tegra/soc/t234/plat_ras.c
+index b092e35..af05419 100644
+--- a/plat/nvidia/tegra/soc/t234/plat_ras.c
++++ b/plat/nvidia/tegra/soc/t234/plat_ras.c
+@@ -14,6 +14,8 @@
+ #include <bl31/ea_handle.h>
+ #include <common/debug.h>
+ #include <drivers/arm/gic600ae_fmu.h>
++#include <drivers/arm/gicv3.h>
++#include <drivers/delay_timer.h>
+ #include <lib/bakery_lock.h>
+ #include <lib/extensions/ras.h>
+ #include <lib/extensions/ras_arch.h>
+@@ -204,27 +206,52 @@ static bool is_err_record_supported(struct err_record_info *record)
+ 	return true;
+ }
+ 
+-static void tegra234_ras_clear_ccpm_stale(void)
++void tegra234_ras_clear_ccpmu_registers(void)
+ {
+-  uint64_t status = mmio_read_64(TEGRA234_RAS_CCPMU_BASE + ERR_STATUS(0));
+-  uint64_t val = 0ULL;
+-  if (ERR_STATUS_GET_FIELD(status, V) != 0U){
+-      WARN("tegra234: clearing stale CCPMU RAS error "
+-           "status=0x%llx addr=0x%llx\n",
+-	  (unsigned long long)status,
+-          (unsigned long long)mmio_read_64(TEGRA234_RAS_CCPMU_BASE + ERR_ADDR(0)));
+-      ERR_STATUS_SET_FIELD(val, V, 1);
+-      ERR_STATUS_SET_FIELD(val, AV, 1);
+-      mmio_write_64(TEGRA234_RAS_CCPMU_BASE + ERR_STATUS(0), val);
+-      mmio_write_64(TEGRA234_RAS_CCPMU_BASE + ERR_ADDR(0), 0ULL);
+-      dsbsy();
+-      isb();
+-  }
+-}	
++    uint64_t status = mmio_read_64(TEGRA234_RAS_CCPMU_BASE + ERR_STATUS(0));
++    uint64_t w1c = 0ULL;
++
++    if (ERR_STATUS_GET_FIELD(status, V) == 0U)
++        return;
++
++    WARN("tegra234: clearing CCPMU RAS registers "
++         "status=0x%llx addr=0x%llx\n",
++         (unsigned long long)status,
++         (unsigned long long)mmio_read_64(TEGRA234_RAS_CCPMU_BASE + ERR_ADDR(0)));
++
++    ERR_STATUS_SET_FIELD(w1c, V, 1);
++    if (ERR_STATUS_GET_FIELD(status, AV) != 0U)
++        ERR_STATUS_SET_FIELD(w1c, AV, 1);
++    if (ERR_STATUS_GET_FIELD(status, UE) != 0U) {
++        ERR_STATUS_SET_FIELD(w1c, UE, 1);
++        ERR_STATUS_SET_FIELD(w1c, UET, 1);
++    }
++
++    mmio_write_64(TEGRA234_RAS_CCPMU_BASE + ERR_STATUS(0), w1c);
++    mmio_write_64(TEGRA234_RAS_CCPMU_BASE + ERR_ADDR(0), 0ULL);
++
++    /*
++     * ARM RAS Supplement DDI0587D section 4.3.5:
++     * "For IMPLEMENTATION DEFINED fields in ERR<n>MISC0, writing zero
++     *  returns the error record to an initial quiescent state. In
++     *  particular, if any IMPLEMENTATION DEFINED syndrome fields might
++     *  generate a Fault Handling or Error Recovery Interrupt request,
++     *  writing zero is sufficient to deactivate the Interrupt request."
++     *
++     * Write zero regardless of MV bit — the spec requires this for
++     * interrupt deactivation at the RAS node, independent of MV.
++     */
++    mmio_write_64(TEGRA234_RAS_CCPMU_BASE + ERR_MISC0(0), 0ULL);
++    mmio_write_64(TEGRA234_RAS_CCPMU_BASE + ERR_MISC1(0), 0ULL);
++
++    dsbsy();
++    isb();
++}
++
+ 
+ #define TEGRA234_MB2_POISON_ADDR	ULL(0x60a5a5a5a5a5a5a5)
+ static bool tegra234_ccpmu_is_mb2_boot_poison(uint32_t base,
+-		        uint64_t status)
++		        uint64_t status,uint64_t addr)
+ {
+   if (base != TEGRA234_RAS_CCPMU_BASE) {
+      return false;
+@@ -232,10 +259,10 @@ static bool tegra234_ccpmu_is_mb2_boot_poison(uint32_t base,
+   if (ERR_STATUS_GET_FIELD(status, UE) == 0U) {
+      return false;
+   }
+-  if (mmio_read_64(TEGRA234_RAS_CCPMU_BASE + ERR_ADDR(0)) !=
+-      TEGRA234_MB2_POISON_ADDR) {
+-	  return false;
+-  }
++  if (addr != TEGRA234_MB2_POISON_ADDR){
++     return false;
++  }  
++
+   return true;
+ }	
+ 
+@@ -244,7 +271,8 @@ static bool tegra234_ccpmu_is_mb2_boot_poison(uint32_t base,
+  ******************************************************************************/
+ /* Function to handle error from one given node */
+ static int32_t tegra234_ras_node_handler(uint32_t base, const char *name,
+-		const struct ras_error *errors, unsigned int num_errors)
++        const struct ras_error *errors, unsigned int num_errors,
++        bool *out_was_mb2_poison)
+ {
+ 	bool found = false;
+ 	int32_t ret = 0;
+@@ -257,6 +285,8 @@ static int32_t tegra234_ras_node_handler(uint32_t base, const char *name,
+ 	uint64_t misc2 = mmio_read_64(base + ERR_MISC2(0));
+ 	uint64_t misc3 = mmio_read_64(base + ERR_MISC3(0));
+ 
++	if (out_was_mb2_poison != NULL)
++        *out_was_mb2_poison = false;
+ 	/*
+ 	 * repeat until we have ERR<n>STATUS value consistent with
+ 	 * the syndrome recorded for that error
+@@ -305,6 +335,12 @@ static int32_t tegra234_ras_node_handler(uint32_t base, const char *name,
+ 		serr = U(14);
+ 	}
+ 
++	/* Which EL/exception class brought us here? */
++	uint64_t esr = read_esr_el3();
++	WARN("tegra234: RAS handler entered: ESR_EL3=0x%llx EC=0x%llx\n",
++     (unsigned long long)esr,
++     (unsigned long long)((esr >> 26) & 0x3f));
++	
+ 	ERR_STATUS_SET_FIELD(val, V, 1);
+ 
+ 	ERROR("**************************************\n");
+@@ -345,11 +381,13 @@ static int32_t tegra234_ras_node_handler(uint32_t base, const char *name,
+ 
+ 		ret = -ENOTRECOVERABLE;
+ 		/* Suppress halt for the known MB2 stale CCPMU boot poison. */
+-		if (tegra234_ccpmu_is_mb2_boot_poison(base, status)) {
+-		   WARN("tegra234: suppressing stale MB2 CCPMU boot poison "
+-		         "(status=0x%" PRIx64 "), clearing\n", status);
+-		   tegra234_ras_clear_ccpm_stale();
+-		   ret = 0;
++		if (tegra234_ccpmu_is_mb2_boot_poison(base, status, addr)) {
++			WARN("tegra234: suppressing stale MB2 CCPMU boot poison "
++             "(status=0x%" PRIx64 "), clearing\n", status);
++
++			tegra234_ras_clear_ccpmu_registers();  /* safe — no ARI writes */
++
++			ret = 0;
+ 		}
+ 	} else {
+ 		/* For corrected error, simply clear it. */
+@@ -400,7 +438,8 @@ static int32_t tegra234_ras_record_handler(const struct err_record_info *info,
+ 	assert(aux_data->error_records != NULL);
+ 
+ 	return tegra234_ras_node_handler(base, aux_data->name,
+-			aux_data->error_records, aux_data->num_err_records);
++            aux_data->error_records, aux_data->num_err_records,
++            NULL);
+ }
+ 
+ /* Function to probe an error from error record group. */
+@@ -429,114 +468,94 @@ static int32_t tegra234_gic_ras_record_probe(const struct err_record_info *info,
+  * no handler was found for the interrupt number, this function panics.
+  */
+ static int tegra234_ras_handler(uint32_t intr_raw, uint32_t flags,
+-		void *handle, void *cookie)
++        void *handle, void *cookie)
+ {
+-	uint64_t intr_status = ih_read_ras_intstatus(plat_my_core_pos());
+-	struct err_record_info *selected = NULL;
+-	int probe_data = 0;
+-	int ret = 0;
+-	uint32_t num_records = 0U;
+-	bool system_is_not_recoverable = false;
+-
+-	const struct err_handler_data err_data = {
+-		.version = ERR_HANDLER_VERSION,
+-		.interrupt = intr_raw,
+-		.flags = flags,
+-		.cookie = cookie,
+-		.handle = handle
+-	};
+-
+-	VERBOSE("%s: irq=%d, intr_status=0x%" PRIx64 "\n", __func__, intr_raw, intr_status);
+-
+-	/* INTR_STATUS will be '0' for secondary cores */
+-	if (intr_status == 0)
+-		return 0;
+-
+-	if ((intr_status & TEGRA234_IH_STATUS_MASK_CMU) != 0U) {
+-		selected = tegra234_ras_records_common;
+-		num_records = ARRAY_SIZE(tegra234_ras_records_common);
+-	} else if ((intr_status & TEGRA234_IH_STATUS_MASK_SCF) != 0U) {
+-		selected = tegra234_ras_records_common;
+-		num_records = ARRAY_SIZE(tegra234_ras_records_common);
+-	} else if ((intr_status & TEGRA234_IH_STATUS_MASK_CL0) != 0U) {
+-		selected = tegra234_ras_records_cluster0;
+-		num_records = ARRAY_SIZE(tegra234_ras_records_cluster0);
+-	} else if ((intr_status & TEGRA234_IH_STATUS_MASK_CL1) != 0U) {
+-		selected = tegra234_ras_records_cluster1;
+-		num_records = ARRAY_SIZE(tegra234_ras_records_cluster1);
+-	} else if ((intr_status & TEGRA234_IH_STATUS_MASK_CL2) != 0U) {
+-		selected = tegra234_ras_records_cluster2;
+-		num_records = ARRAY_SIZE(tegra234_ras_records_cluster2);
+-	}
+-
+-	if (selected == NULL){
+-	   WARN("tegra234: ras_handler: unmatched intr_status=0x%llx,"
+-	        " clearing stale CCPMU error\n", (unsigned long long)intr_status);
+-	   tegra234_ras_clear_ccpm_stale();
+-           return 0;	   
+-	}
+-
+-	/* check all the error records */
+-	while (num_records-- > 0U) {
+-
+-		/* Check if the platform supports this error record */
+-		if (!is_err_record_supported(selected)) {
+-			/* next error record */
+-			selected++;
+-			continue;
+-		}
+-
+-		/* Is this record valid? */
+-		ret = selected->probe(selected, &probe_data);
+-
+-		/* Call error handler for the record group */
+-		if (ret != 0) {
+-
+-			/* serialize RAS record accesses across CPUs */
+-			bakery_lock_get(&tegra234_ras_lock);
+-
+-			/* Invoke handler for the RAS node */
+-			ret = selected->handler(selected, probe_data, &err_data);
+-
+-			if (ret == -ENOTRECOVERABLE) {
+-				system_is_not_recoverable = true;
+-			}
+-
+-			bakery_lock_release(&tegra234_ras_lock);
+-
+-			/* Clear interrupt status */
+-			ih_write_intstatus_clr(plat_my_core_pos(), intr_status);
+-
+-			/*
+-			 * Do an EOI of the RAS interrupt. This allows
+-			 * the sdei event to be dispatched at the SDEI
+-			 * event's priority.
+-			 */
+-			plat_ic_end_of_interrupt(intr_raw);
+-
+-			ret = sdei_dispatch_event(TEGRA_SDEI_EP_EVENT_0 +
+-				plat_my_core_pos());
+-			if (ret != 0)
+-				WARN("sdei_dispatch_event returned %d"
+-				     " (SDEI may not be registered yet)\n",
+-			             ret);	     
+-		}
+-
+-		/* next error record */
+-		selected++;
+-	}
+-
+-	/* halt the system for uncorrectable error */
+-	if (system_is_not_recoverable) {
+-		ERROR("Powering off core\n");
+-		(void)mce_command_handler((uint64_t)MCE_CMD_ENTER_CSTATE,
+-			  MCE_CORE_SLEEP_TIME_INFINITE, 0U, 0U);
+-		for (;;) {
+-			wfi();
+-		}
+-	}
+-
+-	return 0;
++	INFO("Entering %s\n", __func__);
++    uint64_t intr_status = ih_read_ras_intstatus(plat_my_core_pos());
++    struct err_record_info *selected = NULL;
++    int probe_data = 0;
++    int ret = 0;
++    uint32_t num_records = 0U;
++    bool system_is_not_recoverable = false;
++
++    const struct err_handler_data err_data = {
++        .version = ERR_HANDLER_VERSION,
++        .interrupt = intr_raw,
++        .flags = flags,
++        .cookie = cookie,
++        .handle = handle
++    };
++
++    VERBOSE("%s: irq=%d, intr_status=0x%" PRIx64 "\n", __func__, intr_raw, intr_status);
++
++    if (intr_status == 0)
++        return 0;
++
++    if ((intr_status & TEGRA234_IH_STATUS_MASK_CMU) != 0U) {
++        selected = tegra234_ras_records_common;
++        num_records = ARRAY_SIZE(tegra234_ras_records_common);
++    } else if ((intr_status & TEGRA234_IH_STATUS_MASK_SCF) != 0U) {
++        selected = tegra234_ras_records_common;
++        num_records = ARRAY_SIZE(tegra234_ras_records_common);
++    } else if ((intr_status & TEGRA234_IH_STATUS_MASK_CL0) != 0U) {
++        selected = tegra234_ras_records_cluster0;
++        num_records = ARRAY_SIZE(tegra234_ras_records_cluster0);
++    } else if ((intr_status & TEGRA234_IH_STATUS_MASK_CL1) != 0U) {
++        selected = tegra234_ras_records_cluster1;
++        num_records = ARRAY_SIZE(tegra234_ras_records_cluster1);
++    } else if ((intr_status & TEGRA234_IH_STATUS_MASK_CL2) != 0U) {
++        selected = tegra234_ras_records_cluster2;
++        num_records = ARRAY_SIZE(tegra234_ras_records_cluster2);
++    }
++
++    if (selected == NULL) {
++        WARN("tegra234: ras_handler: unmatched intr_status=0x%llx,"
++             " clearing stale CCPMU error\n", (unsigned long long)intr_status);
++        tegra234_ras_clear_ccpmu_registers();
++        return 0;
++    }
++
++    while (num_records-- > 0U) {
++        if (!is_err_record_supported(selected)) {
++            selected++;
++            continue;
++        }
++
++        ret = selected->probe(selected, &probe_data);
++
++        if (ret != 0) {
++            
++            bakery_lock_get(&tegra234_ras_lock);
++            ret = selected->handler(selected, probe_data, &err_data);
++            if (ret == -ENOTRECOVERABLE) {
++                system_is_not_recoverable = true;
++            }
++            bakery_lock_release(&tegra234_ras_lock);
++
++
++            ih_write_intstatus_clr(plat_my_core_pos(), intr_status);
++            plat_ic_end_of_interrupt(intr_raw);
++
++            ret = sdei_dispatch_event(TEGRA_SDEI_EP_EVENT_0 +
++                plat_my_core_pos());
++            if (ret != 0)
++                WARN("sdei_dispatch_event returned %d"
++                     " (SDEI may not be registered yet)\n", ret);
++        }
++
++        selected++;
++    }
++
++    if (system_is_not_recoverable) {
++        ERROR("Powering off core\n");
++        (void)mce_command_handler((uint64_t)MCE_CMD_ENTER_CSTATE,
++              MCE_CORE_SLEEP_TIME_INFINITE, 0U, 0U);
++        for (;;) {
++            wfi();
++        }
++    }
++
++    return 0;
+ }
+ 
+ /*******************************************************************************
+@@ -696,35 +715,79 @@ typedef struct err_record_desc {
+  */
+ void tegra234_ras_init_my_cluster(void)
+ {
+-	int id = MPIDR_AFFLVL2_VAL(read_mpidr());
+-	err_record_desc_t list[] = {
+-		{
+-			.record = tegra234_ras_records_cluster0,
+-			.num_entries = ARRAY_SIZE(tegra234_ras_records_cluster0)
+-		},
+-		{
+-			.record = tegra234_ras_records_cluster1,
+-			.num_entries = ARRAY_SIZE(tegra234_ras_records_cluster1)
+-		},
+-		{
+-			.record = tegra234_ras_records_cluster2,
+-			.num_entries = ARRAY_SIZE(tegra234_ras_records_cluster2)
+-		}
+-	};
+-
+-	assert(id < ARRAY_SIZE(list));
+-
+-	/* RAS is only supported by limited platforms */
+-	if (!tegra_platform_is_fpga() && !tegra_platform_is_silicon()) {
+-		return;
+-	}
+-
+-	/* Enable RAS error detection and reporting for the cluster */
+-	if (mce_is_cluster_present(id)) {
+-		enable_error_detection_for_group(list[id].record, list[id].num_entries);
+-	}
+-
+-	VERBOSE("RAS handling enabled for cluster%d\n", id);
++    int id = MPIDR_AFFLVL2_VAL(read_mpidr());
++    err_record_desc_t list[] = {
++        {
++            .record = tegra234_ras_records_cluster0,
++            .num_entries = ARRAY_SIZE(tegra234_ras_records_cluster0)
++        },
++        {
++            .record = tegra234_ras_records_cluster1,
++            .num_entries = ARRAY_SIZE(tegra234_ras_records_cluster1)
++        },
++        {
++            .record = tegra234_ras_records_cluster2,
++            .num_entries = ARRAY_SIZE(tegra234_ras_records_cluster2)
++        }
++    };
++
++    assert(id < ARRAY_SIZE(list));
++
++    if (!tegra_platform_is_fpga() && !tegra_platform_is_silicon()) {
++        return;
++    }
++
++    if (mce_is_cluster_present(id)) {
++        enable_error_detection_for_group(list[id].record,
++                                         list[id].num_entries);
++    }
++
++    /*
++     * Tegra234 workaround: enable_error_detection_for_group() just
++     * wrote ERR_CTLR.UI=1 for the cluster RAS nodes. If any CCPMU
++     * error was latched between our earlier tegra234_ras_clear_ccpmu_registers()
++     * call and this point (e.g. from an MC reconfiguration during
++     * Xen EFI loading), the RAS node immediately asserts its interrupt
++     * wire and the GIC redistributor latches it as pending.
++     *
++     * Fix sequence (order is critical per ARM IHI0069 GICv3 spec):
++     *
++     * Step 1: Clear the interrupt source — write W1C to CCPMU ERR_STATUS
++     *         to deassert the interrupt wire at the RAS node.
++     *         Also zero MISC0/MISC1 per DDI0587D §4.3.5 to ensure the
++     *         node returns to quiescent state.
++     * Step 2: DSB+ISB — ensure the RAS node write completes before
++     *         we touch the GIC.
++     * Step 3: Clear GIC pending state — use gicv3_clear_interrupt_pending()
++     *         to write GICR_ICPENDR0 W1C for both RAS PPIs at this PE's
++     *         redistributor. This removes any pending state that latched
++     *         between the ERR_CTLR write and Step 1.
++     * Step 4: DSB — ensure the GIC write completes.
++     * Step 5: Mask IH sources — prevents future spurious assertions
++     *         until Xen/Dom0 SDEI registration unmasks them.
++     *
++     * Note: gicv3_clear_interrupt_pending() is safe to call here
++     * because tegra_gic_pcpu_init() has already been called for this
++     * CPU earlier in tegra_pwr_domain_on_finish(), so this PE's
++     * redistributor is awake and accessible.
++     */
++    tegra234_ras_clear_ccpmu_registers();
++    dsbsy();
++    isb();
++
++    {
++        unsigned int this_core = plat_my_core_pos();
++
++        gicv3_clear_interrupt_pending(TEGRA234_RAS_PPI_ERI, this_core);
++        gicv3_clear_interrupt_pending(TEGRA234_RAS_PPI_FHI, this_core);
++        dsbsy();
++
++        ih_write_ras_general_mask(this_core, ENB_ALL_INTR_SOURCES);
++        dsbsy();
++        isb();
++    }
++
++    VERBOSE("RAS handling enabled for cluster%d, GIC pending cleared\n", id);
+ }
+ 
+ #if DEBUG
+diff --git a/plat/nvidia/tegra/soc/t234/plat_setup.c b/plat/nvidia/tegra/soc/t234/plat_setup.c
+index f074d54..a8e0754 100644
+--- a/plat/nvidia/tegra/soc/t234/plat_setup.c
++++ b/plat/nvidia/tegra/soc/t234/plat_setup.c
+@@ -15,6 +15,8 @@
+ #include <cortex_a76.h>
+ #include <common/debug.h>
+ #include <denver.h>
++#include <lib/extensions/ras_arch.h>
++#include <tegra234_ras_private.h>
+ #include <drivers/arm/gic_common.h>
+ #include <drivers/arm/gicv3.h>
+ #include <drivers/arm/gic600ae_fmu.h>
+@@ -225,6 +227,42 @@ void plat_early_platform_setup(void)
+ {
+ 	uint32_t __unused val;
+ 
++	{
++		/**
++		 * Clear any stale CCPMU RAS error left by MB2 firmware before doing ANYTHING else — in particular before the first MCE ARI call
++		 */
++		uint64_t status = mmio_read_64(TEGRA234_RAS_CCPMU_BASE + ERR_STATUS(0));
++		uint64_t addr = mmio_read_64(TEGRA234_RAS_CCPMU_BASE + ERR_ADDR(0));
++		uint64_t w1c = 0ULL;
++
++		if (ERR_STATUS_GET_FIELD(status, V) != 0U) {
++			WARN("BL31: Clearing stale CCPMU RAS error: status=0x%llx, addr=0x%llx\n", (unsigned long long)status, (unsigned long long)addr);
++			ERR_STATUS_SET_FIELD(w1c, V, 1);
++
++			if (ERR_STATUS_GET_FIELD(status, AV) != 0U){
++				ERR_STATUS_SET_FIELD(w1c, AV, 1);
++			}
++			if(ERR_STATUS_GET_FIELD(status, UE) != 0U){
++				ERR_STATUS_SET_FIELD(w1c, UE, 1);
++				ERR_STATUS_SET_FIELD(w1c, UET, 1);	
++			}
++			if(ERR_STATUS_GET_FIELD(status, OF) != 0U){
++				ERR_STATUS_SET_FIELD(w1c, OF, 1);	
++			}
++			if(ERR_STATUS_GET_FIELD(status, MV) != 0U){
++				ERR_STATUS_SET_FIELD(w1c, MV, 1);	
++			}
++			if(ERR_STATUS_GET_FIELD(status, DE) != 0U){
++				ERR_STATUS_SET_FIELD(w1c, DE, 1);	
++			}
++
++			mmio_write_64(TEGRA234_RAS_CCPMU_BASE + ERR_STATUS(0),w1c);
++			mmio_write_64(TEGRA234_RAS_CCPMU_BASE + ERR_ADDR(0),0ULL);
++			dsbsy();
++			isb();
++		}
++	}
++
+ 	/* sanity check MCE firmware compatibility */
+ 	mce_verify_firmware_version();
+ 

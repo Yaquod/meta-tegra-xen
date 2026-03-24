@@ -6,7 +6,7 @@ machine: jetson-orin-nano-devkit
 distro: tegra-xen
 target: tegra-xen-image
 
-build_system: oc
+build_system: openembedded
 
 repos:
   poky:

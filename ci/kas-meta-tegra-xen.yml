@@ -46,26 +46,15 @@ repos:
 
 local_conf_header:
   meta-tegra-xen: |
-    # Parallelism
-    BB_NUMBER_THREADS ?= "$(nproc)"
-    PARALLEL_MAKE ?= "-j $(nproc)"
-
+    BB_NUMBER_THREADS ?= "${@os.cpu_count()}"
+    PARALLEL_MAKE ?= "-j ${@os.cpu_count()}"
     INHERIT += "rm_work"
-
-    # Accept NVIDIA EULA (required by meta-tegra)
     LICENSE_FLAGS_ACCEPTED = "commercial_tegra-binaries synaptics-killswitch"
-
     DL_DIR ?= "${TOPDIR}/../../downloads"
     SSTATE_DIR ?= "${TOPDIR}/../../sstate-cache"
- 
-    # Required by some Freescale/NXP recipes pulled in transitively
     ACCEPT_FSL_EULA = "1"
-
     DISTRO_FEATURES:append = " virtualization xen"
-
     SERIAL_CONSOLES = "115200;ttyTCU0 115200;ttyTHS1"
     IMAGE_FEATURES:append = " ssh-server-openssh"
     EXTRA_IMAGE_FEATURES:append = " debug-tweaks"
-
     CONNECTIVITY_CHECK_URIS = ""
-

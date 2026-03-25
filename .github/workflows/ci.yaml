@@ -59,13 +59,33 @@ jobs:
       - name: Validate layer.conf
         run: |
           LAYER_CONF="meta-tegra-xen/conf/layer.conf"
-          for field in BBFILE_COLLECTIONS BBFILE_PATTERN BBFILE_PRIORITY LAYERVERSION; do
-            if grep -q "^$field" "$LAYER_CONF"; then
-              echo "OK: $field"
+ 
+          # Mandatory fields
+          for field in BBFILE_COLLECTIONS BBFILE_PATTERN LAYERSERIES_COMPAT; do
+            if grep -q "$field" "$LAYER_CONF"; then
+              echo "OK (mandatory): $field"
             else
-              echo "ERROR: $field missing from layer.conf"; exit 1
+              echo "ERROR: $field missing from layer.conf — this field is mandatory"; exit 1
             fi
           done
+ 
+          # warn only
+          for field in BBFILE_PRIORITY LAYERVERSION; do
+            if grep -q "$field" "$LAYER_CONF"; then
+              echo "OK (recommended): $field"
+            else
+              echo "WARN: $field not found in layer.conf — recommended but not mandatory"
+            fi
+          done
+ 
+          if grep "LAYERSERIES_COMPAT" "$LAYER_CONF" | grep -q "scarthgap"; then
+            echo "OK: LAYERSERIES_COMPAT includes 'scarthgap'"
+          else
+            echo "ERROR: LAYERSERIES_COMPAT does not declare 'scarthgap' compatibility"
+            echo "  Fix: add this to conf/layer.conf:"
+            echo "    LAYERSERIES_COMPAT_<collection> = \"scarthgap\""
+            exit 1
+          fi
  
       - name: bitbake-layers show-layers
         run: |

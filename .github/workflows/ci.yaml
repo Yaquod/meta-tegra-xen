@@ -109,7 +109,7 @@ jobs:
       - name: yocto-check-layer
         run: |
           kas shell meta-tegra-xen/${{ env.KAS_CONFIG }} \
-            -c "yocto-check-layer --no-auto-dependency ${{ github.workspace }}/meta-tegra-xen"
+            -c "yocto-check-layer ${{ github.workspace }}/meta-tegra-xen"
         env:
           KAS_WORK_DIR: ${{ github.workspace }}/kas-build
 

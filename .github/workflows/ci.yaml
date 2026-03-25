@@ -109,11 +109,24 @@ jobs:
       - name: yocto-check-layer
         run: |
           KAS_BUILD="${{ github.workspace }}/kas-build"
-          kas shell meta-tegra-xen/${{ env.KAS_CONFIG }} \
-            -c "yocto-check-layer \
-              -d ${KAS_BUILD}/meta-tegra \
-              -d ${KAS_BUILD}/meta-virtualization \
-              ${{ github.workspace }}/meta-tegra-xen"
+          MOE="${KAS_BUILD}/meta-openembedded"
+          LAYER="${{ github.workspace }}/meta-tegra-xen"
+
+          mkdir -p "${KAS_BUILD}/ycl-build"
+          cd "${KAS_BUILD}/poky"
+          . oe-init-build-env "${KAS_BUILD}/ycl-build"
+
+          yocto-check-layer \
+            --no-auto-dependency \
+            --machines jetson-orin-nano-devkit \
+            --dependency \
+              "${KAS_BUILD}/meta-tegra" \
+              "${KAS_BUILD}/meta-virtualization" \
+              "${MOE}/meta-oe" \
+              "${MOE}/meta-python" \
+              "${MOE}/meta-networking" \
+              "${MOE}/meta-filesystems" \
+            -- "${LAYER}"
         env:
           KAS_WORK_DIR: ${{ github.workspace }}/kas-build
 

@@ -35,12 +35,12 @@ jobs:
           pip3 install --quiet kas
 
       - name: Prepare kas work directory
-        run: mkdir -p ${{ runner.temp }}/kas-build
+        run: mkdir -p ${{ github.workspace }}/kas-build
  
       - name: Fetch layers (kas checkout)
         run: kas checkout meta-tegra-xen/${{ env.KAS_CONFIG }}
         env:
-          KAS_WORK_DIR: ${{ runner.temp }}/kas-build
+          KAS_WORK_DIR: ${{ github.workspace }}/kas-build
 
       - name: BitBake file syntax scan
         run: |
@@ -93,7 +93,7 @@ jobs:
           kas shell meta-tegra-xen/${{ env.KAS_CONFIG }} \
             -c 'bitbake-layers show-layers'
         env:
-          KAS_WORK_DIR: ${{ runner.temp }}/kas-build
+          KAS_WORK_DIR: ${{ github.workspace }}/kas-build
 
       - name: bitbake-layers show-appends
         run: |
@@ -103,14 +103,14 @@ jobs:
             grep "^ERROR:" /tmp/appends.log; exit 1
           fi
         env:
-          KAS_WORK_DIR: ${{ runner.temp }}/kas-build
+          KAS_WORK_DIR: ${{ github.workspace }}/kas-build
 
       - name: yocto-check-layer
         run: |
           kas shell meta-tegra-xen/${{ env.KAS_CONFIG }} \
             -c "yocto-check-layer --no-auto-dependency ${{ github.workspace }}/meta-tegra-xen"
         env:
-          KAS_WORK_DIR: ${{ runner.temp }}/kas-build
+          KAS_WORK_DIR: ${{ github.workspace }}/kas-build
 
   # JOB 2 — Full image build  (ONLY on push to main — never on PRs)
   build:
@@ -187,7 +187,7 @@ jobs:
             meta-tegra-xen/${{ env.KAS_CONFIG }}
         env:
           KAS_CONTAINER_IMAGE: ${{ env.YOCTO_IMAGE }}
-          KAS_WORK_DIR: ${{ runner.temp }}/kas-build
+          KAS_WORK_DIR: ${{ github.workspace }}/kas-build
           EULA: "1"
 
       - name: Collect image artefacts
@@ -215,6 +215,6 @@ jobs:
         with:
           name: bitbake-failure-log-${{ github.sha }}
           path: |
-            build/tmp/log/
-            build/tmp/work/**/temp/log.do_*
+            ${{ runner.temp }}/kas-build/build/tmp/log/
+            ${{ runner.temp }}/kas-build/build/tmp/work/**/temp/log.do_*
           retention-days: 7

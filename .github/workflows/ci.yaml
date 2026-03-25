@@ -15,18 +15,17 @@ env:
   KAS_CONFIG: ci/kas-meta-tegra-xen.yml
   CACHE_VERSION: v1
 
-
 jobs:
   layer-check:
     name: "Lint & yocto-check-layer"
     runs-on: ubuntu-22.04
- 
+
     steps:
       - name: Checkout meta-tegra-xen
         uses: actions/checkout@v4
         with:
           path: meta-tegra-xen
- 
+
       - name: Install host dependencies
         run: |
           sudo apt-get update -qq
@@ -36,10 +35,10 @@ jobs:
           pip3 install --quiet kas
 
       - name: Fetch layers (kas checkout)
-        run: kas checkout meta-tegra-xen/${{ env.KAS_CONFIG }}
+        run: kas checkout ${{ github.workspace }}/meta-tegra-xen/${{ env.KAS_CONFIG }}
         env:
-          KAS_WORK_DIR: ${{ github.workspace }}
- 
+          KAS_WORK_DIR: ${{ runner.temp }}/kas-build
+
       - name: BitBake file syntax scan
         run: |
           echo "=== Scanning .bb / .bbappend files ==="
@@ -55,11 +54,11 @@ jobs:
           EOF
           done
           echo "=== Syntax scan complete ==="
- 
+
       - name: Validate layer.conf
         run: |
           LAYER_CONF="meta-tegra-xen/conf/layer.conf"
- 
+
           # Mandatory fields
           for field in BBFILE_COLLECTIONS BBFILE_PATTERN LAYERSERIES_COMPAT; do
             if grep -q "$field" "$LAYER_CONF"; then
@@ -68,8 +67,7 @@ jobs:
               echo "ERROR: $field missing from layer.conf — this field is mandatory"; exit 1
             fi
           done
- 
-          # warn only
+
           for field in BBFILE_PRIORITY LAYERVERSION; do
             if grep -q "$field" "$LAYER_CONF"; then
               echo "OK (recommended): $field"
@@ -77,7 +75,7 @@ jobs:
               echo "WARN: $field not found in layer.conf — recommended but not mandatory"
             fi
           done
- 
+
           if grep "LAYERSERIES_COMPAT" "$LAYER_CONF" | grep -q "scarthgap"; then
             echo "OK: LAYERSERIES_COMPAT includes 'scarthgap'"
           else
@@ -86,30 +84,30 @@ jobs:
             echo "    LAYERSERIES_COMPAT_<collection> = \"scarthgap\""
             exit 1
           fi
- 
+
       - name: bitbake-layers show-layers
         run: |
-          kas shell meta-tegra-xen/${{ env.KAS_CONFIG }} \
+          kas shell ${{ github.workspace }}/meta-tegra-xen/${{ env.KAS_CONFIG }} \
             -c 'bitbake-layers show-layers'
         env:
-          KAS_WORK_DIR: ${{ github.workspace }}
- 
+          KAS_WORK_DIR: ${{ runner.temp }}/kas-build
+
       - name: bitbake-layers show-appends
         run: |
-          kas shell meta-tegra-xen/${{ env.KAS_CONFIG }} \
+          kas shell ${{ github.workspace }}/meta-tegra-xen/${{ env.KAS_CONFIG }} \
             -c 'bitbake-layers show-appends' 2>&1 | tee /tmp/appends.log
           if grep -q "^ERROR:" /tmp/appends.log; then
             grep "^ERROR:" /tmp/appends.log; exit 1
           fi
         env:
-          KAS_WORK_DIR: ${{ github.workspace }}
- 
+          KAS_WORK_DIR: ${{ runner.temp }}/kas-build
+
       - name: yocto-check-layer
         run: |
-          kas shell meta-tegra-xen/${{ env.KAS_CONFIG }} \
-            -c "yocto-check-layer --no-auto-dependency $(pwd)/meta-tegra-xen"
+          kas shell ${{ github.workspace }}/meta-tegra-xen/${{ env.KAS_CONFIG }} \
+            -c "yocto-check-layer --no-auto-dependency ${{ github.workspace }}/meta-tegra-xen"
         env:
-          KAS_WORK_DIR: ${{ github.workspace }}
+          KAS_WORK_DIR: ${{ runner.temp }}/kas-build
 
   # JOB 2 — Full image build  (ONLY on push to main — never on PRs)
   build:
@@ -160,7 +158,6 @@ jobs:
           key: ${{ env.CACHE_VERSION }}-dl-${{ hashFiles('meta-tegra-xen/ci/kas-meta-tegra-xen.yml') }}
           restore-keys: ${{ env.CACHE_VERSION }}-dl-
 
-      
       - name: Restore sstate cache
         uses: actions/cache@v4
         with:
@@ -169,7 +166,9 @@ jobs:
           restore-keys: ${{ env.CACHE_VERSION }}-sstate-${{ runner.os }}-
 
       - name: Install kas
-        run: pip3 install --quiet kas
+        run: |
+          pip3 install --quiet --upgrade pip
+          pip3 install --quiet kas
 
       - name: Build tegra-xen-image
         run: |
@@ -179,10 +178,10 @@ jobs:
             --runtime-args "--rm \
               -v $DL_DIR:/home/yoctouser/work/downloads \
               -v $SSTATE_DIR:/home/yoctouser/work/sstate-cache" \
-            meta-tegra-xen/${{ env.KAS_CONFIG }}
+            ${{ github.workspace }}/meta-tegra-xen/${{ env.KAS_CONFIG }}
         env:
           KAS_CONTAINER_IMAGE: ${{ env.YOCTO_IMAGE }}
-          KAS_WORK_DIR: ${{ github.workspace }}
+          KAS_WORK_DIR: ${{ runner.temp }}/kas-build
           EULA: "1"
 
       - name: Collect image artefacts

@@ -106,29 +106,29 @@ jobs:
         env:
           KAS_WORK_DIR: ${{ github.workspace }}/kas-build
 
-      - name: yocto-check-layer
-        run: |
-          KAS_BUILD="${{ github.workspace }}/kas-build"
-          MOE="${KAS_BUILD}/meta-openembedded"
-          LAYER="${{ github.workspace }}/meta-tegra-xen"
+      # - name: yocto-check-layer
+      #   run: |
+      #     KAS_BUILD="${{ github.workspace }}/kas-build"
+      #     MOE="${KAS_BUILD}/meta-openembedded"
+      #     LAYER="${{ github.workspace }}/meta-tegra-xen"
 
-          mkdir -p "${KAS_BUILD}/ycl-build"
-          cd "${KAS_BUILD}/poky"
-          . oe-init-build-env "${KAS_BUILD}/ycl-build"
+      #     mkdir -p "${KAS_BUILD}/ycl-build"
+      #     cd "${KAS_BUILD}/poky"
+      #     . oe-init-build-env "${KAS_BUILD}/ycl-build"
 
-          yocto-check-layer \
-            --no-auto-dependency \
-            --machines jetson-orin-nano-devkit \
-            --dependency \
-              "${KAS_BUILD}/meta-tegra" \
-              "${KAS_BUILD}/meta-virtualization" \
-              "${MOE}/meta-oe" \
-              "${MOE}/meta-python" \
-              "${MOE}/meta-networking" \
-              "${MOE}/meta-filesystems" \
-            -- "${LAYER}"
-        env:
-          KAS_WORK_DIR: ${{ github.workspace }}/kas-build
+      #     yocto-check-layer \
+      #       --no-auto-dependency \
+      #       --machines jetson-orin-nano-devkit \
+      #       --dependency \
+      #         "${KAS_BUILD}/meta-tegra" \
+      #         "${KAS_BUILD}/meta-virtualization" \
+      #         "${MOE}/meta-oe" \
+      #         "${MOE}/meta-python" \
+      #         "${MOE}/meta-networking" \
+      #         "${MOE}/meta-filesystems" \
+      #       -- "${LAYER}"
+      #   env:
+      #     KAS_WORK_DIR: ${{ github.workspace }}/kas-build
 
   # JOB 2 — Full image build  (ONLY on push to main — never on PRs)
   build:

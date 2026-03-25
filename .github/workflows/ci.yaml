@@ -90,14 +90,14 @@ jobs:
       - name: bitbake-layers show-layers
         run: |
           kas shell meta-tegra-xen/${{ env.KAS_CONFIG }} \
-            -- bitbake-layers show-layers
+            -c 'bitbake-layers show-layers'
         env:
           KAS_WORK_DIR: ${{ github.workspace }}
  
       - name: bitbake-layers show-appends
         run: |
           kas shell meta-tegra-xen/${{ env.KAS_CONFIG }} \
-            -- bitbake-layers show-appends 2>&1 | tee /tmp/appends.log
+            -c 'bitbake-layers show-appends' 2>&1 | tee /tmp/appends.log
           if grep -q "^ERROR:" /tmp/appends.log; then
             grep "^ERROR:" /tmp/appends.log; exit 1
           fi
@@ -106,10 +106,8 @@ jobs:
  
       - name: yocto-check-layer
         run: |
-          kas shell meta-tegra-xen/${{ env.KAS_CONFIG }} -- \
-            yocto-check-layer \
-              --no-auto-dependency \
-              $(pwd)/meta-tegra-xen
+          kas shell meta-tegra-xen/${{ env.KAS_CONFIG }} \
+            -c "yocto-check-layer --no-auto-dependency $(pwd)/meta-tegra-xen"
         env:
           KAS_WORK_DIR: ${{ github.workspace }}
 

@@ -108,8 +108,12 @@ jobs:
 
       - name: yocto-check-layer
         run: |
+          KAS_BUILD="${{ github.workspace }}/kas-build"
           kas shell meta-tegra-xen/${{ env.KAS_CONFIG }} \
-            -c "yocto-check-layer ${{ github.workspace }}/meta-tegra-xen"
+            -c "yocto-check-layer \
+              -d ${KAS_BUILD}/meta-tegra \
+              -d ${KAS_BUILD}/meta-virtualization \
+              ${{ github.workspace }}/meta-tegra-xen"
         env:
           KAS_WORK_DIR: ${{ github.workspace }}/kas-build
 

@@ -34,8 +34,11 @@ jobs:
           pip3 install --quiet --upgrade pip
           pip3 install --quiet kas
 
+      - name: Prepare kas work directory
+        run: mkdir -p ${{ runner.temp }}/kas-build
+ 
       - name: Fetch layers (kas checkout)
-        run: kas checkout ${{ github.workspace }}/meta-tegra-xen/${{ env.KAS_CONFIG }}
+        run: kas checkout meta-tegra-xen/${{ env.KAS_CONFIG }}
         env:
           KAS_WORK_DIR: ${{ runner.temp }}/kas-build
 
@@ -87,14 +90,14 @@ jobs:
 
       - name: bitbake-layers show-layers
         run: |
-          kas shell ${{ github.workspace }}/meta-tegra-xen/${{ env.KAS_CONFIG }} \
+          kas shell meta-tegra-xen/${{ env.KAS_CONFIG }} \
             -c 'bitbake-layers show-layers'
         env:
           KAS_WORK_DIR: ${{ runner.temp }}/kas-build
 
       - name: bitbake-layers show-appends
         run: |
-          kas shell ${{ github.workspace }}/meta-tegra-xen/${{ env.KAS_CONFIG }} \
+          kas shell meta-tegra-xen/${{ env.KAS_CONFIG }} \
             -c 'bitbake-layers show-appends' 2>&1 | tee /tmp/appends.log
           if grep -q "^ERROR:" /tmp/appends.log; then
             grep "^ERROR:" /tmp/appends.log; exit 1
@@ -104,7 +107,7 @@ jobs:
 
       - name: yocto-check-layer
         run: |
-          kas shell ${{ github.workspace }}/meta-tegra-xen/${{ env.KAS_CONFIG }} \
+          kas shell meta-tegra-xen/${{ env.KAS_CONFIG }} \
             -c "yocto-check-layer --no-auto-dependency ${{ github.workspace }}/meta-tegra-xen"
         env:
           KAS_WORK_DIR: ${{ runner.temp }}/kas-build
@@ -169,6 +172,9 @@ jobs:
         run: |
           pip3 install --quiet --upgrade pip
           pip3 install --quiet kas
+ 
+      - name: Prepare kas work directory
+        run: mkdir -p ${{ runner.temp }}/kas-build
 
       - name: Build tegra-xen-image
         run: |
@@ -178,7 +184,7 @@ jobs:
             --runtime-args "--rm \
               -v $DL_DIR:/home/yoctouser/work/downloads \
               -v $SSTATE_DIR:/home/yoctouser/work/sstate-cache" \
-            ${{ github.workspace }}/meta-tegra-xen/${{ env.KAS_CONFIG }}
+            meta-tegra-xen/${{ env.KAS_CONFIG }}
         env:
           KAS_CONTAINER_IMAGE: ${{ env.YOCTO_IMAGE }}
           KAS_WORK_DIR: ${{ runner.temp }}/kas-build
@@ -188,13 +194,13 @@ jobs:
         if: success()
         run: |
           mkdir -p artifacts
-          DEPLOY="${{ github.workspace }}/build/tmp/deploy/images/jetson-orin-nano-devkit"
+          DEPLOY="${{ runner.temp }}/kas-build/build/tmp/deploy/images/jetson-orin-nano-devkit"
           find "$DEPLOY" \
             \( -name "*.wic.zst" -o -name "*.wic.bmap" \
             -o -name "*.manifest" -o -name "*.dtb" -o -name "Image" \) \
             -exec cp {} artifacts/ \; 2>/dev/null || true
           ls -lh artifacts/
-
+ 
       - name: Upload image artefacts
         if: success()
         uses: actions/upload-artifact@v4
@@ -202,7 +208,7 @@ jobs:
           name: tegra-xen-image-${{ github.sha }}
           path: artifacts/
           retention-days: 14
-
+ 
       - name: Upload bitbake failure logs
         if: failure()
         uses: actions/upload-artifact@v4

@@ -45,13 +45,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     socat \
     texinfo \
     iputils-ping \
-    # Patch / diff
     patch \
-    # Perl (required by bitbake)
-    libperl5.34 \
-    # RPM (required by some recipes)
+    perl \
     rpm \
-    # pseudo / fakeroot
     pseudo \
     lz4 \
     # kas (Yocto project configurator)

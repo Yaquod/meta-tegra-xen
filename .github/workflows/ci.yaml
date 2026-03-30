@@ -201,11 +201,12 @@ jobs:
         run: |
           DL_DIR="${{ github.workspace }}/downloads"
           SSTATE_DIR="${{ github.workspace }}/sstate-cache"
-          kas build \
-            --runtime-args "--rm \
-              -v $DL_DIR:/home/yoctouser/work/downloads \
-              -v $SSTATE_DIR:/home/yoctouser/work/sstate-cache" \
-            meta-tegra-xen/${{ env.KAS_CONFIG }}
+          KAS_CONTAINER_ARGS="--rm \
+            -v $DL_DIR:/home/yoctouser/work/downloads \
+            -v $SSTATE_DIR:/home/yoctouser/work/sstate-cache"
+
+          export KAS_CONTAINER_ARGS
+          kas build meta-tegra-xen/${{ env.KAS_CONFIG }}
         env:
           KAS_CONTAINER_IMAGE: ${{ env.YOCTO_IMAGE }}
           KAS_WORK_DIR: ${{ github.workspace }}/kas-build

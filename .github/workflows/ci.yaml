@@ -137,6 +137,9 @@ jobs:
     needs: layer-check
     if: (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')) || (github.event_name == 'pull_request' && (github.base_ref == 'main' || github.base_ref == 'master'))
     environment: build-approval
+    permissions:
+      contents: read
+      packages: write
     steps:
       - name: Free runner disk space
         run: |
@@ -162,12 +165,12 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build & push Yocto builder image
+      - name: Build Yocto builder image (no push on PRs)
         uses: docker/build-push-action@v5
         with:
           context: meta-tegra-xen/ci
           file: meta-tegra-xen/ci/Dockerfile
-          push: true
+          push: ${{ github.event_name == 'push' }}
           tags: ${{ env.YOCTO_IMAGE }}
           cache-from: type=registry,ref=${{ env.YOCTO_IMAGE }}-cache
           cache-to: type=registry,ref=${{ env.YOCTO_IMAGE }}-cache,mode=max

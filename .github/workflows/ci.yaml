@@ -1,0 +1,242 @@
+name: meta-tegra-xen CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  YOCTO_IMAGE: ghcr.io/yaquod/yocto-scarthgap-builder:latest
+  KAS_CONFIG: ci/kas-meta-tegra-xen.yml
+  CACHE_VERSION: v1
+
+jobs:
+  layer-check:
+    name: "Lint & yocto-check-layer"
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout meta-tegra-xen
+        uses: actions/checkout@v4
+        with:
+          path: meta-tegra-xen
+
+      - name: Install host dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            python3 python3-pip git \
+            chrpath diffstat
+          pip3 install --quiet --upgrade pip
+          pip3 install --quiet kas
+
+      - name: Prepare kas work directory
+        run: mkdir -p ${{ github.workspace }}/kas-build
+ 
+      - name: Fetch layers (kas checkout)
+        run: kas checkout meta-tegra-xen/${{ env.KAS_CONFIG }}
+        env:
+          KAS_WORK_DIR: ${{ github.workspace }}/kas-build
+
+      - name: BitBake file syntax scan
+        run: |
+          echo "=== Scanning .bb / .bbappend files ==="
+          find meta-tegra-xen -name "*.bb" -o -name "*.bbappend" | while read f; do
+            python3 - "$f" <<'EOF'
+          import sys, re
+          path = sys.argv[1]
+          with open(path) as fh:
+              for i, line in enumerate(fh, 1):
+                  s = line.strip()
+                  if re.match(r'^[A-Z_].*=\s*"', s) and s.count('"') % 2 != 0:
+                      print(f"WARN unbalanced quote {path}:{i}: {line.rstrip()}")
+          EOF
+          done
+          echo "=== Syntax scan complete ==="
+
+      - name: Validate layer.conf
+        run: |
+          LAYER_CONF="meta-tegra-xen/conf/layer.conf"
+
+          # Mandatory fields
+          for field in BBFILE_COLLECTIONS BBFILE_PATTERN LAYERSERIES_COMPAT; do
+            if grep -q "$field" "$LAYER_CONF"; then
+              echo "OK (mandatory): $field"
+            else
+              echo "ERROR: $field missing from layer.conf — this field is mandatory"; exit 1
+            fi
+          done
+
+          for field in BBFILE_PRIORITY LAYERVERSION; do
+            if grep -q "$field" "$LAYER_CONF"; then
+              echo "OK (recommended): $field"
+            else
+              echo "WARN: $field not found in layer.conf — recommended but not mandatory"
+            fi
+          done
+
+          if grep "LAYERSERIES_COMPAT" "$LAYER_CONF" | grep -q "scarthgap"; then
+            echo "OK: LAYERSERIES_COMPAT includes 'scarthgap'"
+          else
+            echo "ERROR: LAYERSERIES_COMPAT does not declare 'scarthgap' compatibility"
+            echo "  Fix: add this to conf/layer.conf:"
+            echo "    LAYERSERIES_COMPAT_<collection> = \"scarthgap\""
+            exit 1
+          fi
+
+      - name: bitbake-layers show-layers
+        run: |
+          kas shell meta-tegra-xen/${{ env.KAS_CONFIG }} \
+            -c 'bitbake-layers show-layers'
+        env:
+          KAS_WORK_DIR: ${{ github.workspace }}/kas-build
+
+      - name: bitbake-layers show-appends
+        run: |
+          kas shell meta-tegra-xen/${{ env.KAS_CONFIG }} \
+            -c 'bitbake-layers show-appends' 2>&1 | tee /tmp/appends.log
+          if grep -q "^ERROR:" /tmp/appends.log; then
+            grep "^ERROR:" /tmp/appends.log; exit 1
+          fi
+        env:
+          KAS_WORK_DIR: ${{ github.workspace }}/kas-build
+
+      # - name: yocto-check-layer
+      #   run: |
+      #     KAS_BUILD="${{ github.workspace }}/kas-build"
+      #     MOE="${KAS_BUILD}/meta-openembedded"
+      #     LAYER="${{ github.workspace }}/meta-tegra-xen"
+
+      #     mkdir -p "${KAS_BUILD}/ycl-build"
+      #     cd "${KAS_BUILD}/poky"
+      #     . oe-init-build-env "${KAS_BUILD}/ycl-build"
+
+      #     yocto-check-layer \
+      #       --no-auto-dependency \
+      #       --machines jetson-orin-nano-devkit \
+      #       --dependency \
+      #         "${KAS_BUILD}/meta-tegra" \
+      #         "${KAS_BUILD}/meta-virtualization" \
+      #         "${MOE}/meta-oe" \
+      #         "${MOE}/meta-python" \
+      #         "${MOE}/meta-networking" \
+      #         "${MOE}/meta-filesystems" \
+      #       -- "${LAYER}"
+      #   env:
+      #     KAS_WORK_DIR: ${{ github.workspace }}/kas-build
+
+  # JOB 2 — Full image build  (ONLY on push to main — never on PRs)
+  build:
+    name: "Build tegra-xen-image"
+    runs-on: ubuntu-22.04
+    needs: layer-check
+    if: (github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')) || (github.event_name == 'pull_request' && (github.base_ref == 'main' || github.base_ref == 'master'))
+    environment: build-approval
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Free runner disk space
+        run: |
+          echo "Before:"; df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android \
+                      /opt/ghc /opt/hostedtoolcache/CodeQL \
+                      "$AGENT_TOOLSDIRECTORY"
+          sudo docker image prune --all --force || true
+          echo "After:"; df -h /
+
+      - name: Checkout meta-tegra-xen
+        uses: actions/checkout@v4
+        with:
+          path: meta-tegra-xen
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Yocto builder image (no push on PRs)
+        uses: docker/build-push-action@v5
+        with:
+          context: meta-tegra-xen/ci
+          file: meta-tegra-xen/ci/Dockerfile
+          push: ${{ github.event_name == 'push' }}
+          tags: ${{ env.YOCTO_IMAGE }}
+          cache-from: type=registry,ref=${{ env.YOCTO_IMAGE }}-cache
+          cache-to: type=registry,ref=${{ env.YOCTO_IMAGE }}-cache,mode=max
+
+      - name: Restore download cache
+        uses: actions/cache@v4
+        with:
+          path: downloads
+          key: ${{ env.CACHE_VERSION }}-dl-${{ hashFiles('meta-tegra-xen/ci/kas-meta-tegra-xen.yml') }}
+          restore-keys: ${{ env.CACHE_VERSION }}-dl-
+
+      - name: Restore sstate cache
+        uses: actions/cache@v4
+        with:
+          path: sstate-cache
+          key: ${{ env.CACHE_VERSION }}-sstate-${{ runner.os }}-${{ hashFiles('meta-tegra-xen/**/*.bb', 'meta-tegra-xen/**/*.bbappend', 'meta-tegra-xen/ci/kas-meta-tegra-xen.yml') }}
+          restore-keys: ${{ env.CACHE_VERSION }}-sstate-${{ runner.os }}-
+
+      - name: Install kas
+        run: |
+          pip3 install --quiet --upgrade pip
+          pip3 install --quiet kas
+ 
+      - name: Prepare kas work directory
+        run: mkdir -p ${{ runner.temp }}/kas-build
+
+      - name: Build tegra-xen-image
+        run: |
+          DL_DIR="${{ github.workspace }}/downloads"
+          SSTATE_DIR="${{ github.workspace }}/sstate-cache"
+          KAS_CONTAINER_ARGS="--rm \
+            -v $DL_DIR:/home/yoctouser/work/downloads \
+            -v $SSTATE_DIR:/home/yoctouser/work/sstate-cache"
+
+          export KAS_CONTAINER_ARGS
+          kas build meta-tegra-xen/${{ env.KAS_CONFIG }}
+        env:
+          KAS_CONTAINER_IMAGE: ${{ env.YOCTO_IMAGE }}
+          KAS_WORK_DIR: ${{ github.workspace }}/kas-build
+          EULA: "1"
+
+      - name: Collect image artefacts
+        if: success()
+        run: |
+          mkdir -p artifacts
+          DEPLOY="${{ runner.temp }}/kas-build/build/tmp/deploy/images/jetson-orin-nano-devkit"
+          find "$DEPLOY" \
+            \( -name "*.wic.zst" -o -name "*.wic.bmap" \
+            -o -name "*.manifest" -o -name "*.dtb" -o -name "Image" \) \
+            -exec cp {} artifacts/ \; 2>/dev/null || true
+          ls -lh artifacts/
+ 
+      - name: Upload image artefacts
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tegra-xen-image-${{ github.sha }}
+          path: artifacts/
+          retention-days: 14
+ 
+      - name: Upload bitbake failure logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bitbake-failure-log-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/kas-build/build/tmp/log/
+            ${{ runner.temp }}/kas-build/build/tmp/work/**/temp/log.do_*
+          retention-days: 7

@@ -1,0 +1,60 @@
+
+header:
+  version: 14
+
+machine: jetson-orin-nano-devkit
+distro: tegra-xen
+target: tegra-xen-image
+
+build_system: openembedded
+
+repos:
+  poky:
+    url: https://git.yoctoproject.org/poky
+    refspec: scarthgap
+    layers:
+      meta:
+      meta-poky:
+      meta-yocto-bsp:
+
+  meta-openembedded:
+    url: https://git.openembedded.org/meta-openembedded
+    refspec: scarthgap
+    layers:
+      meta-oe:
+      meta-python:
+      meta-networking:
+      meta-filesystems:
+
+  meta-virtualization:
+    url: https://git.yoctoproject.org/meta-virtualization
+    refspec: scarthgap
+    layers:
+      .:
+
+  meta-tegra:
+    url: https://github.com/OE4T/meta-tegra
+    refspec: scarthgap
+    layers:
+      .:
+
+  
+  meta-tegra-xen:
+    path: ../../meta-tegra-xen/meta-tegra-xen 
+    layers:
+      .:
+
+local_conf_header:
+  meta-tegra-xen: |
+    BB_NUMBER_THREADS ?= "${@os.cpu_count()}"
+    PARALLEL_MAKE ?= "-j ${@os.cpu_count()}"
+    INHERIT += "rm_work"
+    LICENSE_FLAGS_ACCEPTED = "commercial_tegra-binaries synaptics-killswitch"
+    DL_DIR ?= "${TOPDIR}/../../downloads"
+    SSTATE_DIR ?= "${TOPDIR}/../../sstate-cache"
+    ACCEPT_FSL_EULA = "1"
+    DISTRO_FEATURES:append = " virtualization xen"
+    SERIAL_CONSOLES = "115200;ttyTCU0 115200;ttyTHS1"
+    IMAGE_FEATURES:append = " ssh-server-openssh"
+    EXTRA_IMAGE_FEATURES:append = " debug-tweaks"
+    CONNECTIVITY_CHECK_URIS = ""

@@ -17,6 +17,12 @@ IMAGE_INSTALL = " \
     xen-tools-volatiles \
     xen-dtb-merge \
     xen-bootfiles \
+    l4t-usb-device-mode \
+    iptables \
+    iproute2 \
+    wpa-supplicant \
+    iw \
+    wireless-regdb-static \
 "
 
 IMAGE_ROOTFS_EXTRA_SPACE = "1048576"
@@ -26,6 +32,10 @@ IMAGE_BOOT_FILES += " \
     tegra234-xen-merged.dtb \
     xen.cfg \
 "
+
+IMAGE_INSTALL:append = " networkmanager networkmanager-nmcli tegra-wifi linux-firmware-iwlwifi linux-firmware-rtl8168 \
+    linux-firmware-rtl8822 \
+    "
 
 ROOTFS_POSTPROCESS_COMMAND += "add_xen_extlinux_entry; "
 

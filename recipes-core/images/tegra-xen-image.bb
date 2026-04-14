@@ -45,12 +45,23 @@ IMAGE_INSTALL:append = " \
     iw \
     wireless-regdb-static \
     e2fsprogs e2fsprogs-mke2fs \
+    util-linux \
 "
 
 IMAGE_INSTALL:remove = " \
     systemd-networkd \
     systemd-networkd-configuration \
 "
+
+
+do_image_tegraflash_tar[depends] += "xt-image-domd:do_image_ext4"
+
+DOMD_IMAGE_PATH = "${DEPLOY_DIR_IMAGE}/xt-image-domd-${MACHINE}.rootfs.ext4"
+
+DOMD_SPARSE_IMAGE = "domd.img"
+
+TEGRAFLASH_SDCARD_SIZE="64G"
+inherit image_types_xen
 
 ROOTFS_POSTPROCESS_COMMAND += "add_xen_extlinux_entry; "
 

@@ -1,0 +1,13 @@
+[Unit]
+Description=SCUDA CUDA API forwarding server
+After=network.target
+
+[Service]
+Type=simple
+ExecStartPre=/bin/sh -c 'test -f /usr/bin/scuda-server || /usr/bin/build-scuda.sh'
+ExecStart=/usr/bin/scuda-server
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

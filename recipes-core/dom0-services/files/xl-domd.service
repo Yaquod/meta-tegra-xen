@@ -1,0 +1,22 @@
+[Unit]
+Description=Xen Driver Domain (DomD) Service
+# Require Xen daemons to be running before this service starts
+Requires=xenstored.service xenconsoled.service xen-init-dom0.service
+After=xenstored.service xenconsoled.service xen-init-dom0.service
+# Only start if the domain configuration file exists
+ConditionPathExists=/etc/xen/domd.cfg
+
+[Service]
+Type=oneshot
+# Tells systemd to consider the service "running" after the start command exits
+RemainAfterExit=yes
+
+# Start the domain using the specific DomD configuration
+ExecStart=/usr/sbin/xl create /etc/xen/domd.cfg
+
+# Gracefully shutdown the domain (the Xen config specifies 'name = "DomD"')
+# -w waits for the domain to complete its shutdown process
+ExecStop=/usr/sbin/xl shutdown -w DomD
+
+[Install]
+WantedBy=multi-user.target

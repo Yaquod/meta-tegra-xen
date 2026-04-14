@@ -23,6 +23,7 @@ IMAGE_INSTALL = " \
     wpa-supplicant \
     iw \
     wireless-regdb-static \
+    dom0-services \
 "
 
 IMAGE_ROOTFS_EXTRA_SPACE = "1048576"
@@ -33,9 +34,23 @@ IMAGE_BOOT_FILES += " \
     xen.cfg \
 "
 
-IMAGE_INSTALL:append = " networkmanager networkmanager-nmcli tegra-wifi linux-firmware-iwlwifi linux-firmware-rtl8168 \
+IMAGE_INSTALL:append = " \
+    networkmanager \
+    networkmanager-nmcli \
+    networkmanager-wifi \
+    tegra-wifi \
     linux-firmware-rtl8822 \
-    "
+    linux-firmware-rtl8168 \
+    wpa-supplicant \
+    iw \
+    wireless-regdb-static \
+    e2fsprogs e2fsprogs-mke2fs \
+"
+
+IMAGE_INSTALL:remove = " \
+    systemd-networkd \
+    systemd-networkd-configuration \
+"
 
 ROOTFS_POSTPROCESS_COMMAND += "add_xen_extlinux_entry; "
 

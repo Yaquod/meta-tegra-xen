@@ -1,0 +1,6 @@
+[Match]
+Name=xenbr0
+
+[Network]
+DHCP=yes
+IPv4Forwarding=yes

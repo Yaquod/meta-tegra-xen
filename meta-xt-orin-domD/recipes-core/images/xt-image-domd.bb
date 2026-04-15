@@ -74,3 +74,12 @@ IMAGE_INSTALL:append = " \
 "
 IMAGE_FSTYPES = "ext4 tar.gz"
 IMAGE_ROOTFS_SIZE = "16777216"
+IMAGE_FEATURES += "read-only-rootfs-delayed-libs"
+
+IMAGE_INSTALL:append = " \
+    nvidia-l4t-core \
+    nvidia-l4t-cuda \
+    nvidia-l4t-multimedia \
+    nvidia-l4t-firmware \
+    udev \
+"

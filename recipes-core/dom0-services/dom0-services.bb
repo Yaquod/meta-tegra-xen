@@ -7,12 +7,13 @@ SRC_URI = " \
     file://xl-domu.service \
     file://domd.cfg \
     file://domu.cfg \
+    file://nvgpu-unbind.service \
 "
 
 inherit systemd
 
 SYSTEMD_PACKAGES = "${PN}"
-SYSTEMD_SERVICE:${PN} = "xl-domd.service xl-domu.service"
+SYSTEMD_SERVICE:${PN} = "xl-domd.service xl-domu.service nvgpu-unbind.service"
 SYSTEMD_AUTO_ENABLE:${PN} = "enable"
 
 do_install() {
@@ -20,6 +21,8 @@ do_install() {
     install -d ${D}${systemd_system_unitdir}
     install -m 0644 ${WORKDIR}/xl-domd.service ${D}${systemd_system_unitdir}/
     install -m 0644 ${WORKDIR}/xl-domu.service ${D}${systemd_system_unitdir}/
+    install -d ${D}${systemd_system_unitdir}
+    install -m 0644 ${WORKDIR}/nvgpu-unbind.service ${D}${systemd_system_unitdir}/nvgpu-unbind.service
 
     # Install the Xen guest configuration files
     install -d ${D}${sysconfdir}/xen

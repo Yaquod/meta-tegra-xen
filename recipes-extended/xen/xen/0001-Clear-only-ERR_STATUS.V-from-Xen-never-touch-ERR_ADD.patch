@@ -1,8 +1,11 @@
-From f85e210d2b2583f79c13067607e4e14ed24ace16 Mon Sep 17 00:00:00 2001
+From 73bea40cc3160106a82fe75b4430e57254cb3824 Mon Sep 17 00:00:00 2001
 From: Ahmed Wafdy <ahmedadelwafdy782@gmail.com>
 Date: Sun, 1 Mar 2026 00:49:28 +0000
 Subject: [PATCH] Clear only ERR_STATUS.V from Xen, never touch ERR_ADDR, so
  ATF's poison signature check can succeed
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
 
 Implement SDEI Client in Xen
 
@@ -16,23 +19,45 @@ Without this handler, EL3 has no destination for RAS events, causing system asse
 Xen must virtualize SDEI for Guest OSes at EL1.
 
 - Prevent MCE from asserting by pre-clearing the CCPMU ERR0STATUS before MCE checks it
+
+xen/arm/smmu: add NVIDIA Tegra234 SMMU compatible strings
+
+	The NVIDIA Tegra234 SoC (Jetson Orin family) uses three SMMU-500
+instances with vendor-specific compatible strings:
+
+  iommu@8000000  (smmu_niso1): "nvidia,tegra234-smmu", "nvidia,smmu-500"
+  iommu@10000000 (smmu_iso):   "nvidia,tegra234-smmu", "nvidia,smmu-500"
+  iommu@12000000 (smmu_niso0): "nvidia,tegra234-smmu", "nvidia,smmu-500"
+
+Without this change Xen's ARM SMMU driver does not probe any of these
+instances because it only matches "arm,mmu-500" — not "nvidia,smmu-500"
+or "nvidia,tegra234-smmu". Consequently "iommu" never appears in
+`xl info virt_caps` and dtdev passthrough is rejected with:
+
+  libxl: error: passthrough not supported on this platform
+
+All three instances are architecturally ARM SMMU-500 (SMMUv2) and
+operate correctly through the existing ARM_SMMU_V2 code path. The
+nvidia,tegra234-smmu compatible is listed first so it takes priority
+when both strings are present in the DTB node.
 ---
- config/StdGNU.mk                  |  12 +-
- tools/configure                   |  32 +++---
- tools/firmware/Makefile           |  12 +-
- xen/arch/arm/Makefile             |   2 +
- xen/arch/arm/arm64/Makefile       |   1 +
- xen/arch/arm/arm64/sdei_entry.S   |  34 ++++++
- xen/arch/arm/efi/efi-boot.h       | 162 +++++++++++++++++++++++---
- xen/arch/arm/include/asm/sdei.h   |  73 ++++++++++++
- xen/arch/arm/platforms/tegra234.c | 105 ++++++++++++++---
- xen/arch/arm/sdei.c               | 181 ++++++++++++++++++++++++++++++
- xen/arch/arm/setup.c              |   3 +
- xen/arch/arm/smpboot.c            |   3 +
- xen/arch/arm/vsdei.c              |  26 +++++
- xen/arch/arm/vsmc.c               |  13 ++-
- xen/common/efi/boot.c             | 149 +++++++++++++++++++++++-
- 15 files changed, 746 insertions(+), 62 deletions(-)
+ config/StdGNU.mk                   |  12 +-
+ tools/configure                    |  32 ++---
+ tools/firmware/Makefile            |  12 +-
+ xen/arch/arm/Makefile              |   2 +
+ xen/arch/arm/arm64/Makefile        |   1 +
+ xen/arch/arm/arm64/sdei_entry.S    |  34 ++++++
+ xen/arch/arm/efi/efi-boot.h        | 162 +++++++++++++++++++++++---
+ xen/arch/arm/include/asm/sdei.h    |  73 ++++++++++++
+ xen/arch/arm/platforms/tegra234.c  | 105 ++++++++++++++---
+ xen/arch/arm/sdei.c                | 181 +++++++++++++++++++++++++++++
+ xen/arch/arm/setup.c               |   3 +
+ xen/arch/arm/smpboot.c             |   3 +
+ xen/arch/arm/vsdei.c               |  26 +++++
+ xen/arch/arm/vsmc.c                |  13 ++-
+ xen/common/efi/boot.c              | 149 +++++++++++++++++++++++-
+ xen/drivers/passthrough/arm/smmu.c |   2 +
+ 16 files changed, 748 insertions(+), 62 deletions(-)
  create mode 100644 xen/arch/arm/arm64/sdei_entry.S
  create mode 100644 xen/arch/arm/include/asm/sdei.h
  create mode 100644 xen/arch/arm/sdei.c
@@ -1202,3 +1227,16 @@ index e5e86f22b2..174e1a297d 100644
      efi_exit_boot(ImageHandle, SystemTable);
  
      efi_arch_post_exit_boot(); /* Doesn't return. */
+diff --git a/xen/drivers/passthrough/arm/smmu.c b/xen/drivers/passthrough/arm/smmu.c
+index 71799064f8..9ff670235d 100644
+--- a/xen/drivers/passthrough/arm/smmu.c
++++ b/xen/drivers/passthrough/arm/smmu.c
+@@ -2452,6 +2452,8 @@ static const struct of_device_id arm_smmu_of_match[] = {
+ 	{ .compatible = "arm,mmu-400", .data = (void *)ARM_SMMU_V1 },
+ 	{ .compatible = "arm,mmu-401", .data = (void *)ARM_SMMU_V1 },
+ 	{ .compatible = "arm,mmu-500", .data = (void *)ARM_SMMU_V2 },
++	{ .compatible = "nvidia,tegra234-smmu", .data = (void *)ARM_SMMU_V2 },
++	{ .compatible = "nvidia,smmu-500", .data = (void *)ARM_SMMU_V2 },
+ 	{ },
+ };
+ MODULE_DEVICE_TABLE(of, arm_smmu_of_match);

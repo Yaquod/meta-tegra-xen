@@ -85,7 +85,7 @@
         __overlay__ {
             xen,passthrough;
             iommus = <0xf0 0x07>;
-            status = "okay";
+            status = "disabled";
         };
     };
 
@@ -117,8 +117,15 @@
         target-path = "/bus@0/usb@3610000";
         __overlay__ {
             xen,passthrough;
-            /delete-property/ iommus;
-            status = "okay";
+            status = "disabled";
+        };
+    };
+
+    fragment@5 {
+        target-path = "/bus@0/host1x@13e00000";
+        __overlay__ {
+            xen,passthrough;
+            status = "disabled";
         };
     };
 };

@@ -1,0 +1,224 @@
+/*
+ * tegra234-domd.dts
+ *
+ * Partial Device Tree for DomD (Driver Domain) on NVIDIA Jetson Orin Nano Super
+ * (p3768-0000+p3767-0005-super / Tegra234).
+ *
+ * Purpose
+ * -------
+ * This file describes the hardware nodes passed through to DomD via Xen.
+ * It is compiled to a DTB and referenced in xen.cfg as:
+ *
+ *   dtb = "/boot/tegra234-domd.dtb"
+ *
+ * Nodes included
+ * --------------
+ *   - smmu_niso1 (iommu@8000000)   – SMMU needed so the GPU and host1x can
+ *                                    do DMA inside DomD with IOVA translation.
+ *   - gpu@17000000  (ga10b)        – GPU passthrough, SID 0x07 on smmu_niso1.
+ *   - host1x@13e00000              – host1x hub, SID 0x27 on smmu_niso1.
+ *                                    Required for GPU command submission
+ *                                    (syncpoints, channel arbitration).
+ *
+ * SMMU / IOMMU ownership
+ * ----------------------
+ * In the dom0 Xen overlay (tegra234-orin-nano-xen.dts):
+ *   fragment@2  sets gpu@17000000   iommus = <0xf0 0x07>  (smmu_niso1, SID 0x07)
+ *   fragment@5  sets host1x@13e00000 as xen,passthrough + disabled
+ *
+ * This partial DTB mirrors those bindings so DomD's Linux kernel sees the same
+ * SMMU relationship and can program context banks correctly.
+ *
+ * How Xen maps MMIO/IRQs
+ * ----------------------
+ * Xen reads the `reg` and `interrupts` properties from dtdev entries in
+ * xen.cfg, so they MUST match the base DTS values exactly.  All values
+ * below are taken verbatim from the base DTB (tegra234-orin.dts).
+ *
+ * xen.cfg dtdev entries that correspond to this file:
+ *   dtdev = ["/host1x@13e00000", "/host1x@13e00000/gpu@17000000"]
+ * NOTE: Xen expects the paths WITHOUT the leading /bus@0, i.e. as they
+ * appear in THIS partial DTB root (not the full SoC DTS).
+ */
+
+/dts-v1/;
+
+/ {
+	#address-cells = <0x02>;
+	#size-cells = <0x02>;
+	compatible = "nvidia,p3768-0000+p3767-0005-super", "nvidia,p3767-0005",
+	             "nvidia,tegra234";
+	model = "NVIDIA Jetson Orin Nano Super - DomD partial DTB";
+
+	/* ----------------------------------------------------------------
+	 * Interrupt controller stub
+	 * Xen injects a virtual GIC into every domain.  The partial DTB
+	 * must declare it so interrupt-parent references resolve.
+	 * GICv2 base addresses for Tegra234 (same as dom0 view):
+	 *   GICD: 0x0f400000  GICC: 0x0f41c000
+	 * ---------------------------------------------------------------- */
+	interrupt-controller@f400000 {
+		compatible = "arm,cortex-a15-gic";
+		#interrupt-cells = <0x03>;
+		interrupt-controller;
+		reg = <0x00 0x0f400000 0x00 0x10000
+		       0x00 0x0f41c000 0x00 0x10000>;
+		phandle = <0x01>;
+	};
+
+	/* ----------------------------------------------------------------
+	 * smmu_niso1 — iommu@8000000
+	 *
+	 * The SMMU must be present in DomD's DTB so the GPU and host1x
+	 * drivers can attach their IOVA domains.  Xen maps the SMMU MMIO
+	 * to DomD as part of the dtdev passthrough.
+	 *
+	 * Values taken from base DTS (line 5448):
+	 *   reg = <0x00 0x8000000 0x00 0x1000000
+	 *          0x00 0x7000000 0x00 0x1000000>
+	 *   phandle 0xf0 is used internally; we reassign it here as 0x02
+	 *   so it does not conflict with the GIC phandle.
+	 *   The nvidia,memory-controller reference is dropped — that node
+	 *   is not passed through to DomD and is not needed for IOVA setup.
+	 * ---------------------------------------------------------------- */
+	iommu@8000000 {
+		compatible = "nvidia,tegra234-smmu", "nvidia,smmu-500";
+		reg = <0x00 0x8000000 0x00 0x1000000
+		       0x00 0x7000000 0x00 0x1000000>;
+		#iommu-cells = <0x01>;
+		#global-interrupts = <0x02>;
+		/* Interrupts: global (2) + per-context-bank from base DTS.
+		 * Include only the two global lines; per-CB IRQs are not
+		 * needed in the partial DTB. */
+		interrupts = <0x00 0xee 0x04
+		              0x00 0xf2 0x04>;
+		interrupt-parent = <0x01>;
+		stream-match-mask = <0x7f80>;
+		status = "okay";
+		phandle = <0x02>;   /* local alias for iommus references below */
+	};
+
+	/* ----------------------------------------------------------------
+	 * gpu@17000000  (ga10b)
+	 *
+	 * Copied from base DTS (line 4917).  Changes vs base:
+	 *   - iommus added: smmu_niso1 (phandle 0x02 in this file), SID 0x07
+	 *   - iommu-map-mask = <0x00> prevents DomD Linux from setting up a
+	 *     second SMMU context (Xen already owns the hardware CB).
+	 *   - status = "okay"  (base has no explicit status; default is okay,
+	 *     but dom0 overlay disables it for passthrough — re-enable here)
+	 *   - xen,passthrough removed (that property is for dom0's overlay,
+	 *     not for the DomD partial DTB)
+	 *   - phandle renumbered to 0x03 (avoid collision)
+	 *
+	 * reg (two 64-bit ranges from base DTS):
+	 *   0x17000000  size 0x1000000   (GPU MMIO)
+	 *   0x18000000  size 0x1000000   (GPU MMIO range 2)
+	 *   0x3b41000   size 0x1000      (PRI Falcon / PRIV)
+	 *
+	 * interrupts (from base DTS, all level-high GIC SPI):
+	 *   0x44 = stall0, 0x46 = stall1, 0x47 = stall2, 0x43 = nonstall
+	 * ---------------------------------------------------------------- */
+	gpu@17000000 {
+		compatible = "nvidia,ga10b";
+		reg = <0x00 0x17000000 0x00 0x1000000
+		       0x00 0x18000000 0x00 0x1000000
+		       0x00 0x03b41000 0x00 0x1000>;
+		interrupts = <0x00 0x44 0x04
+		              0x00 0x46 0x04
+		              0x00 0x47 0x04
+		              0x00 0x43 0x04>;
+		interrupt-names = "stall0", "stall1", "stall2", "nonstall";
+		interrupt-parent = <0x01>;
+
+		iommus = <0x02 0x07>;
+		iommu-map-mask = <0x00>;
+		dma-coherent;
+
+		/* Clock / reset / power references are intentionally omitted:
+		 * these phandles point to bpmp/cmu nodes that are NOT passed
+		 * through to DomD.  The NVIDIA out-of-tree GPU driver (nvgpu)
+		 * obtains clocks via the BPMP IPC channel, not directly from
+		 * Linux clock framework, so the absence of clock/reset props
+		 * in the partial DTB is correct for a passthrough guest. */
+
+		status = "okay";
+		phandle = <0x03>;
+		#cooling-cells = <0x02>;
+	};
+
+	/* ----------------------------------------------------------------
+	 * host1x@13e00000
+	 *
+	 * host1x is the command-submission hub that the GPU (and other
+	 * multimedia engines) use for channel/syncpoint management.
+	 * Even for a GPU-only DomD it must be present and functional.
+	 *
+	 * Copied from base DTS (line 5807).  Changes:
+	 *   - iommus: smmu_niso1 phandle (0x02 here), SID 0x27
+	 *   - iommu-map trimmed to only the smmu_niso1 entries (0x08-0x0f
+	 *     range, base DTS second half); the smmu_niso0 (0x04) entries
+	 *     are dropped because that SMMU is not passed through to DomD.
+	 *   - nvidia,memory-controller reference dropped (not passed through)
+	 *   - Child nodes (vi0, vi1, pva0, nvdla*, isp*, nvcsi, display*)
+	 *     are omitted — only the GPU channel path through host1x is
+	 *     needed for DomD.  Add them back if you pass more engines.
+	 *   - phandle renumbered to 0x04
+	 *
+	 * reg (4 ranges from base DTS):
+	 *   common:      0x13e00000  0x10000
+	 *   hypervisor:  0x13e10000  0x10000
+	 *   vm:          0x13e40000  0x10000
+	 *   actmon:      0x13ef0000  0x60000
+	 *
+	 * interrupts (9 lines from base DTS):
+	 *   syncpt0-7: 0x1c0-0x1c7, host1x: 0x107
+	 * ---------------------------------------------------------------- */
+	host1x@13e00000 {
+		compatible = "nvidia,tegra234-host1x";
+		reg = <0x00 0x13e00000 0x00 0x10000
+		       0x00 0x13e10000 0x00 0x10000
+		       0x00 0x13e40000 0x00 0x10000
+		       0x00 0x13ef0000 0x00 0x60000>;
+		reg-names = "common", "hypervisor", "vm", "actmon";
+
+		interrupts = <0x00 0x1c0 0x04
+		              0x00 0x1c1 0x04
+		              0x00 0x1c2 0x04
+		              0x00 0x1c3 0x04
+		              0x00 0x1c4 0x04
+		              0x00 0x1c5 0x04
+		              0x00 0x1c6 0x04
+		              0x00 0x1c7 0x04
+		              0x00 0x107 0x04>;
+		interrupt-names = "syncpt0", "syncpt1", "syncpt2", "syncpt3",
+		                  "syncpt4", "syncpt5", "syncpt6", "syncpt7",
+		                  "host1x";
+		interrupt-parent = <0x01>;
+
+		iommus = <0x02 0x27>;
+		/* Only smmu_niso1 entries (IDs 0x08-0x0f → SIDs 0x35-0x3c).
+		 * Format: <stream-id  iommu-phandle  sid  count> */
+		iommu-map = <0x08 0x02 0x35 0x01
+		             0x09 0x02 0x36 0x01
+		             0x0a 0x02 0x37 0x01
+		             0x0b 0x02 0x38 0x01
+		             0x0c 0x02 0x39 0x01
+		             0x0d 0x02 0x3a 0x01
+		             0x0e 0x02 0x3b 0x01
+		             0x0f 0x02 0x3c 0x01>;
+
+		#address-cells = <0x02>;
+		#size-cells = <0x02>;
+		ranges = <0x00 0x14800000 0x00 0x14800000 0x00 0x2000000
+		          0x00 0x24700000 0x00 0x24700000 0x00 0x80000>;
+
+		dma-coherent;
+		status = "okay";
+		phandle = <0x04>;
+
+		/* gpu@17000000 is a sibling node at the top level, not a
+		 * child of host1x, so nothing more is needed here unless you
+		 * add multimedia engine children (vi, isp, nvdla, pva). */
+	};
+};

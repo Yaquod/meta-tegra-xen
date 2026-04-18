@@ -2,23 +2,64 @@
 /plugin/;
 
 /*
- * Xen Dom0 Device Tree Overlay for Jetson Orin Nano (p3768+p3767-0000)
+ * Xen overlay for NVIDIA Jetson Orin Nano Super (p3768-0000+p3767-0005-super).
  *
- * Hardware: Orin Nano 6-core (Cortex-A78AE)
- * Core bitmap from MCE FW: 0xcf = 0b11001111
- *   Cluster 0: cores 0-3 present  (mpidr 0x000, 0x100, 0x200, 0x300)
- *   Cluster 1: NO cores present   (mpidr 0x10000-0x10300 all absent)
- *   Cluster 2: cores 0-1 present  (mpidr 0x20000, 0x20100)
- *              cores 2-3 absent   (mpidr 0x20200, 0x20300)
- *
+ * Change log vs original:
+ *   fragment@0  – SD card: keep /delete-property/ iommus, add dma-coherent so the
+ *                 ADMA engine gets a 1:1 PA mapping under Xen instead of going through
+ *                 SMMU context bank 2 (fixes the repeated iova=0x1e8945200 fault).
+ *   fragment@1  – UART: unchanged, confirmed working.
+ *   fragment@2  – GPU passthrough: path corrected to /bus@0/gpu@17000000 (ga10b).
+ *                 The base DTS node has NO iommus property, only dma-coherent; the
+ *                 overlay therefore sets iommus to the smmu_niso1 (phandle 0xf0)
+ *                 stream ID 0x07 so Xen's SMMU driver can take ownership, and also
+ *                 sets iommu-map-mask = <0x00> to prevent Linux from setting up its
+ *                 own SMMU context for this device.
+ *   fragment@3  – eMMC: add /delete-property/ iommus to match the SD card treatment;
+ *                 dma-coherent already present in the original overlay is kept.
+ *   fragment@4  – USB host passthrough: add /delete-property/ iommus so Xen's SMMU
+ *                 driver takes sole ownership of stream 0x0e.
+ *                 NOTE: usb@3550000 (xudc, device-mode controller) is a SEPARATE node
+ *                 and is NOT passed through here — it remains in dom0. If you also
+ *                 need the device controller in DomU, add a further fragment for
+ *                 /bus@0/usb@3550000 with xen,passthrough and /delete-property/ iommus.
  */
 
 / {
+    /*
+     * "nvidia,tegra234" is present in all p3767 board compatibles, so
+     * fdtoverlay will match regardless of the exact SKU string in the base DTB.
+     */
     compatible = "nvidia,p3768-0000+p3767-0000", "nvidia,p3767-0000",
                  "nvidia,tegra234";
 
-    /* UART */
+    /* ------------------------------------------------------------------ */
+    /* fragment@0 — SD card (mmc@3400000)                                  */
+    /*                                                                      */
+    /* Problem: base DTS has iommus = <0xf0 0x01>.  With that in place the */
+    /* ADMA descriptor PA 0x1e8945200 hits SMMU context bank 2, which has  */
+    /* no valid mapping, producing the repeated context fault seen in the   */
+    /* boot log.  Deleting iommus removes the SMMU from the data path;     */
+    /* dma-coherent ensures the ADMA engine gets identity-mapped addresses. */
+    /* ------------------------------------------------------------------ */
     fragment@0 {
+        target-path = "/bus@0/mmc@3400000";
+        __overlay__ {
+            status = "okay";
+            /* iommus binding kept — with iommu.passthrough=1 working,
+            Linux will create an identity domain for this device.
+            The SMMU maps PA→PA so ADMA addresses resolve correctly. */
+        };
+    };
+
+    /* ------------------------------------------------------------------ */
+    /* fragment@1 — Dom0 UART console (serial@3100000)                     */
+    /*                                                                      */
+    /* Removing resets/reset-names prevents the Linux reset framework from  */
+    /* asserting the UART reset at driver probe, which races with Xen's own */
+    /* early console on this port.                                          */
+    /* ------------------------------------------------------------------ */
+    fragment@1 {
         target-path = "/bus@0/serial@3100000";
         __overlay__ {
             /delete-property/ resets;
@@ -27,17 +68,57 @@
         };
     };
 
-    /* IOMMU: disable all SMMUs — Xen manages them directly */
-    fragment@1 {
-        target-path = "/bus@0/iommu@12000000";
-        __overlay__ { status = "disabled"; };
-    };
+    /* ------------------------------------------------------------------ */
+    /* fragment@2 — GPU passthrough to DomU (gpu@17000000, ga10b)          */
+    /*                                                                      */
+    /* The base DTS node has dma-coherent but NO iommus / iommu-map.       */
+    /* We add iommus = <0xf0 0x07> so that Xen's SMMU driver registers the */
+    /* GPU stream (smmu_niso1, SID 0x07) in the hypervisor's SMMU tables.  */
+    /* iommu-map-mask = <0x00> prevents Linux from also claiming this       */
+    /* context, avoiding a dual-ownership conflict.                         */
+    /*                                                                      */
+    /* 0xf0 = phandle of iommu@8000000 (smmu_niso1) in the base DTS.      */
+    /* 0x07 = GPU stream ID on Tegra234 / smmu_niso1.                      */
+    /* ------------------------------------------------------------------ */
     fragment@2 {
-        target-path = "/bus@0/iommu@10000000";
-        __overlay__ { status = "disabled"; };
+        target-path = "/bus@0/gpu@17000000";
+        __overlay__ {
+            xen,passthrough;
+            iommus = <0xf0 0x07>;
+            status = "okay";
+        };
     };
+
+    /* ------------------------------------------------------------------ */
+    /* fragment@3 — eMMC (mmc@3460000)                                     */
+    /*                                                                      */
+    /* Base DTS has status="disabled" and iommus = <0xf0 0x02>.            */
+    /* Enable the node, remove the SMMU binding (same rationale as the SD  */
+    /* card above), and keep dma-coherent for identity-mapped DMA.         */
+    /* ------------------------------------------------------------------ */
     fragment@3 {
-        target-path = "/bus@0/iommu@8000000";
-        __overlay__ { status = "disabled"; };
+        target-path = "/bus@0/mmc@3460000";
+        __overlay__ {
+            status = "okay";
+        };
+    };
+
+    /* ------------------------------------------------------------------ */
+    /* fragment@4 — xHCI USB host passthrough to DomU (usb@3610000)        */
+    /*                                                                      */
+    /* Base DTS has iommus = <0xf0 0x0e>.  Removing it hands the stream    */
+    /* entirely to Xen's SMMU driver; without deletion, dom0 and Xen both  */
+    /* attempt to program context bank 0x0e, causing undefined behaviour.  */
+    /*                                                                      */
+    /* usb@3550000 (xudc, device-mode) is NOT touched here and remains in  */
+    /* dom0.  Add a separate fragment if you need it in DomU.              */
+    /* ------------------------------------------------------------------ */
+    fragment@4 {
+        target-path = "/bus@0/usb@3610000";
+        __overlay__ {
+            xen,passthrough;
+            /delete-property/ iommus;
+            status = "okay";
+        };
     };
 };

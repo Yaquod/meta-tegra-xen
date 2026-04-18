@@ -1,4 +1,4 @@
-From ef5ed0f00359d56e7ee1e48a426b63eefacc3c35 Mon Sep 17 00:00:00 2001
+From f85e210d2b2583f79c13067607e4e14ed24ace16 Mon Sep 17 00:00:00 2001
 From: Ahmed Wafdy <ahmedadelwafdy782@gmail.com>
 Date: Sun, 1 Mar 2026 00:49:28 +0000
 Subject: [PATCH] Clear only ERR_STATUS.V from Xen, never touch ERR_ADDR, so
@@ -25,14 +25,14 @@ Xen must virtualize SDEI for Guest OSes at EL1.
  xen/arch/arm/arm64/sdei_entry.S   |  34 ++++++
  xen/arch/arm/efi/efi-boot.h       | 162 +++++++++++++++++++++++---
  xen/arch/arm/include/asm/sdei.h   |  73 ++++++++++++
- xen/arch/arm/platforms/tegra234.c | 104 ++++++++++++++---
+ xen/arch/arm/platforms/tegra234.c | 105 ++++++++++++++---
  xen/arch/arm/sdei.c               | 181 ++++++++++++++++++++++++++++++
  xen/arch/arm/setup.c              |   3 +
  xen/arch/arm/smpboot.c            |   3 +
  xen/arch/arm/vsdei.c              |  26 +++++
  xen/arch/arm/vsmc.c               |  13 ++-
  xen/common/efi/boot.c             | 149 +++++++++++++++++++++++-
- 15 files changed, 745 insertions(+), 62 deletions(-)
+ 15 files changed, 746 insertions(+), 62 deletions(-)
  create mode 100644 xen/arch/arm/arm64/sdei_entry.S
  create mode 100644 xen/arch/arm/include/asm/sdei.h
  create mode 100644 xen/arch/arm/sdei.c
@@ -542,7 +542,7 @@ index 0000000000..3c3643fec5
 +#endif /* __ASM_ARM_SDEI_H__ */
 \ No newline at end of file
 diff --git a/xen/arch/arm/platforms/tegra234.c b/xen/arch/arm/platforms/tegra234.c
-index b69f7b123f..16a197362b 100644
+index b69f7b123f..bab37389fe 100644
 --- a/xen/arch/arm/platforms/tegra234.c
 +++ b/xen/arch/arm/platforms/tegra234.c
 @@ -37,41 +37,113 @@
@@ -673,7 +673,15 @@ index b69f7b123f..16a197362b 100644
      return 0;
  }
  
-@@ -119,8 +191,8 @@ static const struct dt_device_match tegra234_blacklist_dev[] __initconst =
+@@ -100,6 +172,7 @@ static int tegra234_specific_mapping(struct domain *d)
+  */
+ static const struct dt_device_match tegra234_blacklist_dev[] __initconst =
+ {
++    DT_MATCH_COMPATIBLE("nvidia,tegra234-host1x"), /* Host1x Bus Controller */
+     DT_MATCH_COMPATIBLE("nvidia,ga10b"),		/* Ampere GPU */
+ 
+     DT_MATCH_COMPATIBLE("nvidia,tegra234-dce"),		/* Display Engine */
+@@ -119,8 +192,8 @@ static const struct dt_device_match tegra234_blacklist_dev[] __initconst =
      DT_MATCH_COMPATIBLE("nvidia,tegra194-isp"),
      DT_MATCH_COMPATIBLE("nvidia,tegra194-nvcsi"),
  

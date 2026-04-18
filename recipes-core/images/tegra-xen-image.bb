@@ -52,39 +52,25 @@ IMAGE_INSTALL:append = " \
 IMAGE_INSTALL:remove = "networkmanager networkmanager-nmcli networkmanager-wifi init-ifupdown"
 TEGRAFLASH_SDCARD_SIZE="64G"
 
-# TEGRA_EXTRA_PARTITIONS = "domd:21474836480:xt-image-domd-${MACHINE}.rootfs.ext4"
-# TEGRA_EXTRA_PARTITION_DEPS = "xt-image-domd"
-# TEGRA_EXTRA_PARTITION_RESERVED = "APP"
-# # You MUST also reduce the APP size here so the sum fits 64GB
-# # If Dom0 is 30GB and DomD is 20GB, set Dom0 (APP) to 30GB:
-# ROOTFSPART_SIZE = "32212254720"
-
-
-# Inherit our custom multi-domain class
+# Inherit custom multi-domain class
 inherit tegra-multi-dom
 
 # Define your domains: NAME:SIZE_IN_BYTES:RECIPE_NAME
-# Size should be in bytes (e.g., 20GB = 21474836480)
 TEGRA_DOMAINS = "\
     domd:21474836480:xt-image-domd \
 "
 
-# Ensure the main OS (Dom0) leaves room on the 64GB card
-# 30GB Dom0 + 20GB DomD + 4GB DomUs = 54GB (Fits comfortably on 64GB card)
-ROOTFSPART_SIZE = "32212254720"
 ROOTFS_POSTPROCESS_COMMAND += "add_xen_extlinux_entry; "
-
 add_xen_extlinux_entry() {
     EXTLINUX="${IMAGE_ROOTFS}${L4T_EXTLINUX_BASEDIR}/extlinux/extlinux.conf"
     if [ -f "${EXTLINUX}" ]; then
         sed -i 's/^DEFAULT primary/DEFAULT xen/' "${EXTLINUX}"
         cat >> "${EXTLINUX}" << 'XENENTRY'
-
 LABEL xen
-    MENU LABEL Xen Hypervisor + Linux Dom0
+    MENU LABEL Xen Hypervisor
     LINUX /boot/xen.efi
     FDT /boot/tegra234-xen-merged.dtb
-    APPEND ${cbootargs} console=dtuart dtuart=/bus@0/serial@3100000 dom0_mem=2G dom0_max_vcpus=4 sched=credit2 loglvl=all guest_loglvl=all smmu=yes iommu=no serrors=forward sync_console noreboot
+    APPEND ${cbootargs} console=dtuart dtuart=/bus@0/serial@3100000 dom0_mem=2G dom0_max_vcpus=4 sched=credit2 loglvl=warning guest_loglvl=warning smmu=yes iommu=yes iommu.passthrough=1 arm-smmu.disable_bypass=0 module_blacklist=tegra_host1x,nvidia,nvmap serrors=forward
 XENENTRY
     fi
 }

@@ -16,8 +16,9 @@ do_install() {
 default=xen
 
 [xen]
-options=console=dtuart dtuart=/bus@0/serial@3100000 dom0_mem=2048M dom0_max_vcpus=4 loglvl=warning guest_loglvl=warning smmu=yes iommu=yes serrors=forward
-kernel=Image console=hvc0 console=ttyTCU0 console=ttyTHS1,115200 earlycon=xen clk_ignore_unused root=/dev/mmcblk0p1 rw rootwait rootfstype=ext4 iommu.passthrough=1 arm-smmu.disable_bypass=0
+options=console=dtuart dtuart=/bus@0/serial@3100000 dom0_mem=2048M dom0_max_vcpus=4 loglvl=all guest_loglvl=all serrors=forward dom0_iommu=passthrough
+
+kernel=Image console=hvc0 console=ttyTCU0 console=ttyTHS1,115200 earlycon=xen root=/dev/mmcblk0p1 rw rootwait rootfstype=ext4 module_blacklist=tegra_host1x,nvidia,nvmap
 ramdisk=initrd
 dtb=tegra234-xen-merged.dtb
 XENCFG

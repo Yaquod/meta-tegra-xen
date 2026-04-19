@@ -70,7 +70,7 @@ LABEL xen
     MENU LABEL Xen Hypervisor
     LINUX /boot/xen.efi
     FDT /boot/tegra234-xen-merged.dtb
-    APPEND ${cbootargs} console=dtuart dtuart=/bus@0/serial@3100000 dom0_mem=2G dom0_max_vcpus=4 sched=credit2 loglvl=warning guest_loglvl=warning smmu=yes iommu=yes iommu.passthrough=1 arm-smmu.disable_bypass=0 module_blacklist=tegra_host1x,nvidia,nvmap serrors=forward
+    APPEND ${cbootargs} console=dtuart dtuart=/bus@0/serial@3100000 dom0_mem=2G dom0_max_vcpus=4 sched=credit2 loglvl=warning guest_loglvl=warning serrors=forward module_blacklist=tegra_host1x,nvidia,nvmap
 XENENTRY
     fi
 }

@@ -29,6 +29,7 @@ do_deploy:append() {
     install -d ${DEPLOYDIR}
     if [ -f ${D}/boot/xen.efi ]; then
         install -m 0644 ${D}/boot/xen.efi ${DEPLOYDIR}/xen.efi
+        install -m 0644 ${D}/boot/xen.efi ${DEPLOYDIR}/bootaa64.efi
     fi
 }
 

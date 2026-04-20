@@ -1,49 +1,15 @@
 /dts-v1/;
 /plugin/;
 
-/*
- * Xen overlay for NVIDIA Jetson Orin Nano Super (p3768-0000+p3767-0005-super).
- *
- * Change log vs original:
- *   fragment@0  – SD card: keep /delete-property/ iommus, add dma-coherent so the
- *                 ADMA engine gets a 1:1 PA mapping under Xen instead of going through
- *                 SMMU context bank 2 (fixes the repeated iova=0x1e8945200 fault).
- *   fragment@1  – UART: unchanged, confirmed working.
- *   fragment@2  – GPU passthrough: path corrected to /bus@0/gpu@17000000 (ga10b).
- *                 The base DTS node has NO iommus property, only dma-coherent; the
- *                 overlay therefore sets iommus to the smmu_niso1 (phandle 0xf0)
- *                 stream ID 0x07 so Xen's SMMU driver can take ownership, and also
- *                 sets iommu-map-mask = <0x00> to prevent Linux from setting up its
- *                 own SMMU context for this device.
- *   fragment@3  – eMMC: add /delete-property/ iommus to match the SD card treatment;
- *                 dma-coherent already present in the original overlay is kept.
- *   fragment@4  – USB host passthrough: add /delete-property/ iommus so Xen's SMMU
- *                 driver takes sole ownership of stream 0x0e.
- *                 NOTE: usb@3550000 (xudc, device-mode controller) is a SEPARATE node
- *                 and is NOT passed through here — it remains in dom0. If you also
- *                 need the device controller in DomU, add a further fragment for
- *                 /bus@0/usb@3550000 with xen,passthrough and /delete-property/ iommus.
- */
-
 / {
     compatible = "nvidia,p3768-0000+p3767-0000", "nvidia,p3767-0000",
                  "nvidia,tegra234";
 
-    /* ------------------------------------------------------------------ */
-    /* fragment@0 — SD card (mmc@3400000)                                  */
-    /* Keep iommus so Xen knows to map SID 0x01 to Dom0 (1:1 map).        */
-    /* ------------------------------------------------------------------ */
     fragment@0 {
         target-path = "/bus@0/mmc@3400000";
-        __overlay__ {
-            iommus = <0xf0 0x01>;
-            status = "okay";
-        };
+        __overlay__ { status = "okay"; };
     };
 
-    /* ------------------------------------------------------------------ */
-    /* fragment@1 — Dom0 UART console (serial@3100000)                     */
-    /* ------------------------------------------------------------------ */
     fragment@1 {
         target-path = "/bus@0/serial@3100000";
         __overlay__ {
@@ -53,34 +19,19 @@
         };
     };
 
-    /* ------------------------------------------------------------------ */
-    /* fragment@2 — GPU passthrough to DomU (gpu@17000000, ga10b)          */
-    /* Keep iommus so Xen knows SID 0x07 is reserved for future DomU.     */
-    /* ------------------------------------------------------------------ */
     fragment@2 {
         target-path = "/bus@0/gpu@17000000";
         __overlay__ {
             xen,passthrough;
-            iommus = <0xf0 0x07>;
             status = "disabled";
         };
     };
 
-    /* ------------------------------------------------------------------ */
-    /* fragment@3 — eMMC (mmc@3460000)                                     */
-    /* Keep iommus so Xen maps SID 0x02 for Dom0.                         */
-    /* ------------------------------------------------------------------ */
     fragment@3 {
         target-path = "/bus@0/mmc@3460000";
-        __overlay__ {
-            iommus = <0xf0 0x02>;
-            status = "okay";
-        };
+        __overlay__ { status = "okay"; };
     };
 
-    /* ------------------------------------------------------------------ */
-    /* fragment@4 — xHCI USB host passthrough to DomU (usb@3610000)        */
-    /* ------------------------------------------------------------------ */
     fragment@4 {
         target-path = "/bus@0/usb@3610000";
         __overlay__ {
@@ -97,28 +48,14 @@
         };
     };
 
-    /* ------------------------------------------------------------------ */
-    /* fragments 6, 7, 8 — FORCE XEN TO OWN THE SMMU                      */
-    /* Xen's generic arm_smmu driver will bind to these.                   */
-    /* ------------------------------------------------------------------ */
+    /* GPCDMA — leave iommus intact, dom0_iommu=passthrough owns stream 0x04 */
     fragment@6 {
-        target-path = "/bus@0/iommu@8000000";
-        __overlay__ {
-            compatible = "nvidia,tegra234-smmu", "nvidia,smmu-500", "arm,mmu-500";
-        };
+        target-path = "/bus@0/dma-controller@2600000";
+        __overlay__ { status = "okay"; };
     };
 
-    fragment@7 {
-        target-path = "/bus@0/iommu@10000000";
-        __overlay__ {
-            compatible = "nvidia,tegra234-smmu", "nvidia,smmu-500", "arm,mmu-500";
-        };
-    };
-
-    fragment@8 {
-        target-path = "/bus@0/iommu@12000000";
-        __overlay__ {
-            compatible = "nvidia,tegra234-smmu", "nvidia,smmu-500", "arm,mmu-500";
-        };
-    };
+    fragment@7  { target-path = "/bus@0/pcie@140a0000"; __overlay__ { status = "disabled"; }; };
+    fragment@8  { target-path = "/bus@0/pcie@14100000"; __overlay__ { status = "disabled"; }; };
+    fragment@9  { target-path = "/bus@0/pcie@14160000"; __overlay__ { status = "disabled"; }; };
+    fragment@10 { target-path = "/bus@0/pcie@141e0000"; __overlay__ { status = "disabled"; }; };
 };

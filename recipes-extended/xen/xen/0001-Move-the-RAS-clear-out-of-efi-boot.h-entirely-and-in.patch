@@ -1,4 +1,4 @@
-From 9449500d17815d0c1349c7f58e94850ee268e923 Mon Sep 17 00:00:00 2001
+From 3734f5f294cdff7499039ab7a2269ec6530ff2cb Mon Sep 17 00:00:00 2001
 From: Ahmed Wafdy <ahmedadelwafdy782@gmail.com>
 Date: Sun, 1 Mar 2026 00:17:11 +0000
 Subject: [PATCH] Move the RAS clear out of efi-boot.h entirely and into

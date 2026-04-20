@@ -1,4 +1,4 @@
-From 181688f46182c7a31ac1514af6e5770a3c12096c Mon Sep 17 00:00:00 2001
+From 30583432a7d621e99555373673fe60bb6417a57d Mon Sep 17 00:00:00 2001
 From: Ahmed Wafdy <ahmedadelwafdy782@gmail.com>
 Date: Fri, 27 Feb 2026 14:53:08 +0000
 Subject: [PATCH] SError Drain :prevents ATF from seeing SError duringel3_exit

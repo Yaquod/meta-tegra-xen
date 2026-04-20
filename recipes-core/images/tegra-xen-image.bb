@@ -48,7 +48,11 @@ IMAGE_INSTALL:append = " \
     e2fsprogs e2fsprogs-mke2fs \
     util-linux \
 "
-
+IMAGE_BOOT_FILES += " \
+    xen.efi;EFI/BOOT/BOOTAA64.EFI \
+    xen.cfg;EFI/BOOT/xen.cfg \
+    tegra234-xen-merged.dtb;tegra234-xen-merged.dtb \
+"
 IMAGE_INSTALL:remove = "networkmanager networkmanager-nmcli networkmanager-wifi init-ifupdown"
 TEGRAFLASH_SDCARD_SIZE="64G"
 
@@ -70,7 +74,7 @@ LABEL xen
     MENU LABEL Xen Hypervisor
     LINUX /boot/xen.efi
     FDT /boot/tegra234-xen-merged.dtb
-    APPEND ${cbootargs} console=dtuart dtuart=/bus@0/serial@3100000 dom0_mem=2G dom0_max_vcpus=4 sched=credit2 loglvl=warning guest_loglvl=warning serrors=forward module_blacklist=tegra_host1x,nvidia,nvmap
+    APPEND ${cbootargs} smmu=yes iommu=yes dom0_iommu=passthrough console=dtuart dtuart=/bus@0/serial@3100000 dom0_mem=2G dom0_max_vcpus=4 sched=credit2 loglvl=warning guest_loglvl=warning serrors=forward module_blacklist=tegra_host1x,nvidia,nvmap
 XENENTRY
     fi
 }

@@ -1,0 +1,84 @@
+From e1a544224361cd902020bf2bf7bdfac706b1c1c7 Mon Sep 17 00:00:00 2001
+From: AhmedAdelWafdy7 <fandes99@gmail.com>
+Date: Mon, 20 Apr 2026 21:30:27 +0000
+Subject: [PATCH] smmu: Remove unnecessary fault generation for unmapped client
+ access
+
+---
+ xen/drivers/passthrough/arm/smmu.c | 35 ++++++++++++++++++++----------
+ 1 file changed, 24 insertions(+), 11 deletions(-)
+
+diff --git a/xen/drivers/passthrough/arm/smmu.c b/xen/drivers/passthrough/arm/smmu.c
+index 71799064f8..3ebb8abe68 100644
+--- a/xen/drivers/passthrough/arm/smmu.c
++++ b/xen/drivers/passthrough/arm/smmu.c
+@@ -493,7 +493,8 @@ enum arm_smmu_s2cr_privcfg {
+ #define CBA2R_RW64_64BIT		(1 << 0)
+ 
+ /* Translation context bank */
+-#define ARM_SMMU_CB_BASE(smmu)		((smmu)->base + ((smmu)->size >> 1))
++#define ARM_SMMU_CB_BASE(smmu) \
++    ((smmu)->cb_base ? (smmu)->cb_base : ((smmu)->base + ((smmu)->size >> 1)))
+ #define ARM_SMMU_CB(smmu, n)		((n) * (1 << (smmu)->pgshift))
+ 
+ #define ARM_SMMU_CB_SCTLR		0x0
+@@ -642,6 +643,8 @@ struct arm_smmu_device {
+ 	void __iomem			*base;
+ 	unsigned long			size;
+ 	unsigned long			pgshift;
++	/* Non-NULL when context banks are at a separate physical range */
++    void __iomem        *cb_base;
+ 
+ #define ARM_SMMU_FEAT_COHERENT_WALK	(1 << 0)
+ #define ARM_SMMU_FEAT_STREAM_MATCH	(1 << 1)
+@@ -2238,9 +2241,7 @@ static void arm_smmu_device_reset(struct arm_smmu_device *smmu)
+ 
+ 	/* Enable client access, but bypass when no mapping is found */
+ 	reg &= ~(sCR0_CLIENTPD | sCR0_USFCFG);
+-	/* Xen: Unlike Linux, generate a fault when no mapping is found */
+-	reg |= sCR0_USFCFG;
+-
++	
+ 	/* Disable forced broadcasting */
+ 	reg &= ~sCR0_FB;
+ 
+@@ -2488,6 +2489,19 @@ static int arm_smmu_device_dt_probe(struct platform_device *pdev)
+ 	}
+ 	smmu->size = resource_size(res);
+ 
++	/* Tegra234: context banks are at reg[1], not upper half of reg[0] */
++    res = platform_get_resource(pdev, IORESOURCE_MEM, 1);
++    if (res) {
++        smmu->cb_base = devm_ioremap_resource(dev, res);
++        if (IS_ERR(smmu->cb_base)) {
++            dev_warn(dev, "failed to map CB region, using default layout\n");
++            smmu->cb_base = NULL;
++        } else {
++            dev_notice(dev, "using split CB base at 0x%"PRIpaddr"\n",
++                       res->addr);
++        }
++    }
++
+ 	if (of_property_read_u32(dev->of_node, "#global-interrupts",
+ 				 &smmu->num_global_irqs)) {
+ 		dev_err(dev, "missing #global-interrupts property\n");
+@@ -2551,13 +2565,12 @@ static int arm_smmu_device_dt_probe(struct platform_device *pdev)
+ 	parse_driver_options(smmu);
+ 
+ 	if (smmu->version > ARM_SMMU_V1 &&
+-	    smmu->num_context_banks != smmu->num_context_irqs) {
+-		dev_err(dev,
+-			"found only %d context interrupt(s) but %d required\n",
+-			smmu->num_context_irqs, smmu->num_context_banks);
+-		err = -ENODEV;
+-		goto out_put_masters;
+-	}
++        smmu->num_context_banks != smmu->num_context_irqs) {
++        /* Tegra234 shares IRQ lines — clamp instead of failing */
++        dev_warn(dev, "CB count (%u) != IRQ count (%u), clamping\n",
++             smmu->num_context_banks, smmu->num_context_irqs);
++        smmu->num_context_banks = smmu->num_context_irqs;
++    }
+ 
+ 	for (i = 0; i < smmu->num_global_irqs; ++i) {
+ 		err = request_irq(smmu->irqs[i],

@@ -28,6 +28,12 @@ To integrate this layer into your SDV Yocto Project build environment, execute:
 bitbake-layers add-layer meta-tegra-xen
 ```
 
+*Note: To enable and build the Driver Domain (`domD`) mentioned above, you must also add the `meta-xt-orin-domD` layer to your build:*
+
+```bash
+bitbake-layers add-layer meta-xt-orin-domD
+```
+
 ## Quick Start
 Once the layers are configured and dependencies are met, build the SDV reference virtualization image:
 

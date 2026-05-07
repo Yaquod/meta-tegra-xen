@@ -24,6 +24,7 @@ IMAGE_INSTALL = " \
     iw \
     wireless-regdb-static \
     dom0-services \
+    xen-dtb-domd \
 "
 
 IMAGE_BOOT_FILES += " \

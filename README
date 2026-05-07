@@ -1,41 +1,42 @@
-This README file contains information on the contents of the meta-tegra-xen layer.
+# meta-tegra-xen: Software Defined Vehicle (SDV) Platform Layer
 
-Please see the corresponding sections below for details.
+This layer provides a production-ready Yocto environment for configuring Software Defined Vehicle (SDV) architectures on NVIDIA Jetson hardware. By leveraging the Xen hypervisor, this layer enables secure workload consolidation, robust isolation, and high-performance hardware virtualization tailored for modern automotive edge computing and autonomous driving applications.
 
-Dependencies
-============
+## Architecture & Project Status
 
-  URI: <first dependency>
-  branch: <branch name>
+Modern SDV architectures require isolating mixed-criticality systems (e.g., Infotainment, ADAS, Telematics) on a single physical System-on-Chip (SoC). This layer configures a Xen-based virtualization environment tailored for these advanced use cases:
 
-  URI: <second dependency>
-  branch: <branch name>
+*   **dom0 (Control Domain)**: Privileged control domain managing hardware resources and orchestration.
+*   **domD (Driver Domain) - [OPERATIONAL]**: Fully functional driver domain with direct GPU passthrough. This allows near-native graphical and CUDA API performance for hardware-accelerated workloads (e.g., AI/ML inference, ADAS).
+*   **domUs (Unprivileged Domains) - [WIP]**: Isolated, general-purpose compute domains for unprivileged applications (currently Work In Progress).
 
-  .
-  .
-  .
+## Dependencies
 
-Patches
-=======
+This layer relies on the standard Yocto Project build system and the following meta-layers:
 
-Please submit any patches against the meta-tegra-xen layer to the xxxx mailing list (xxxx@zzzz.org)
-and cc: the maintainer:
+  URI: https://github.com/OE4T/meta-tegra.git
+  branch: master (or matching release branch)
 
-Maintainer: XXX YYYYYY <xxx.yyyyyy@zzzzz.com>
+  URI: git://git.yoctoproject.org/meta-virtualization
+  branch: master (or matching release branch)
 
-Table of Contents
-=================
+## Adding the meta-tegra-xen layer to your build
 
-  I. Adding the meta-tegra-xen layer to your build
- II. Misc
+To integrate this layer into your SDV Yocto Project build environment, execute:
 
+```bash
+bitbake-layers add-layer meta-tegra-xen
+```
 
-I. Adding the meta-tegra-xen layer to your build
-=================================================
+## Quick Start
+Once the layers are configured and dependencies are met, build the SDV reference virtualization image:
 
-Run 'bitbake-layers add-layer meta-tegra-xen'
+```bash
+bitbake tegra-xen-image
+```
 
-II. Misc
-========
+## Contributing and Patches
 
---- replace with specific information about the meta-tegra-xen layer ---
+Please submit any patches against the `meta-tegra-xen` layer via standard pull requests.
+
+Maintainer: SDV Platform Team <ahmedadelwafdy782@gmail.com>

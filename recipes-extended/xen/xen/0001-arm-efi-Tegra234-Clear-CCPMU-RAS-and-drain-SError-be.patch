@@ -1,4 +1,4 @@
-From 03b3189ce6c74172969a0d3b037097e3277d8dd2 Mon Sep 17 00:00:00 2001
+From 84c4bc8e3b7c43fee4373757e0d9ed8f06599794 Mon Sep 17 00:00:00 2001
 From: Ahmed Wafdy <ahmedadelwafdy782@gmail.com>
 Date: Fri, 27 Feb 2026 22:55:28 +0000
 Subject: [PATCH] arm: efi: Tegra234: Clear CCPMU RAS and drain SError before

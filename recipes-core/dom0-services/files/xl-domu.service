@@ -1,0 +1,21 @@
+[Unit]
+Description=Xen Unprivileged Domain (DomU) Service
+# DomU requires DomD (the Driver Domain) to be started first
+Requires=xl-domd.service
+After=xl-domd.service
+# Only start if the domain configuration file exists
+ConditionPathExists=/etc/xen/domu.cfg
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+
+# Start the domain using the specific DomU configuration
+ExecStart=/usr/sbin/xl create /etc/xen/domu.cfg
+
+# Gracefully shutdown the domain. Make sure the 'name' in domu.cfg is "DomU"
+# -w waits for the domain to complete its shutdown process
+ExecStop=/usr/sbin/xl shutdown -w DomU
+
+[Install]
+WantedBy=multi-user.target

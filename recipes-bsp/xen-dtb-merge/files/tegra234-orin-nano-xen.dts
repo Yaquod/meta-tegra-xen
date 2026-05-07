@@ -1,24 +1,19 @@
 /dts-v1/;
 /plugin/;
 
-/*
- * Xen Dom0 Device Tree Overlay for Jetson Orin Nano (p3768+p3767-0000)
- *
- * Hardware: Orin Nano 6-core (Cortex-A78AE)
- * Core bitmap from MCE FW: 0xcf = 0b11001111
- *   Cluster 0: cores 0-3 present  (mpidr 0x000, 0x100, 0x200, 0x300)
- *   Cluster 1: NO cores present   (mpidr 0x10000-0x10300 all absent)
- *   Cluster 2: cores 0-1 present  (mpidr 0x20000, 0x20100)
- *              cores 2-3 absent   (mpidr 0x20200, 0x20300)
- *
- */
-
 / {
-    compatible = "nvidia,p3768-0000+p3767-0000", "nvidia,p3767-0000",
+    compatible = "nvidia,p3768-0000+p3767-0005-super",
+                 "nvidia,p3768-0000+p3767-0000",
+                 "nvidia,p3767-0005",
+                 "nvidia,p3767-0000",
                  "nvidia,tegra234";
 
-    /* UART */
     fragment@0 {
+        target-path = "/bus@0/mmc@3400000";
+        __overlay__ { status = "okay"; };
+    };
+
+    fragment@1 {
         target-path = "/bus@0/serial@3100000";
         __overlay__ {
             /delete-property/ resets;
@@ -27,17 +22,87 @@
         };
     };
 
-    /* IOMMU: disable all SMMUs — Xen manages them directly */
-    fragment@1 {
-        target-path = "/bus@0/iommu@12000000";
-        __overlay__ { status = "disabled"; };
-    };
     fragment@2 {
-        target-path = "/bus@0/iommu@10000000";
-        __overlay__ { status = "disabled"; };
+        target-path = "/bus@0/gpu@17000000";
+        __overlay__ {
+            iommus = <0xf0 0x2d>;   /* smmu_niso1 phandle=0xf0, SID=0x2d (GA10B) */
+            xen,passthrough;
+            status = "disabled";
+        };
     };
+
     fragment@3 {
-        target-path = "/bus@0/iommu@8000000";
-        __overlay__ { status = "disabled"; };
+        target-path = "/bus@0/mmc@3460000";
+        __overlay__ { status = "okay"; };
+    };
+
+    fragment@4 {
+        target-path = "/bus@0/usb@3610000";
+        __overlay__ {
+            xen,passthrough;
+            status = "disabled";
+        };
+    };
+
+    fragment@5 {
+        target-path = "/bus@0/host1x@13e00000";
+        __overlay__ {
+            /* iommus already present in base DTS: <0xf0 0x27> */
+            xen,passthrough;
+            status = "disabled";
+        };
+    };
+
+    /* GPCDMA — leave iommus intact, dom0_iommu=passthrough owns stream 0x04 */
+    fragment@6 {
+        target-path = "/bus@0/dma-controller@2600000";
+        __overlay__ { status = "okay"; };
+    };
+
+    fragment@7  { target-path = "/bus@0/pcie@140a0000"; __overlay__ { status = "disabled"; }; };
+    fragment@8  { target-path = "/bus@0/pcie@14100000"; __overlay__ { status = "disabled"; }; };
+    fragment@9  { target-path = "/bus@0/pcie@14160000"; __overlay__ { status = "disabled"; }; };
+    fragment@10 { target-path = "/bus@0/pcie@141e0000"; __overlay__ { status = "disabled"; }; };
+    
+    /* ----------------------------------------------------------------
+     * fragment@11-N — Disable host1x children in Dom0
+     *
+     * Each child has its own SID. When host1x is passed through, Dom0
+     * must not bind these engines — they will be driven by DomD.
+     * Engines that DomD doesn't need can be left disabled.
+     * ---------------------------------------------------------------- */
+    fragment@11 {
+        target-path = "/bus@0/host1x@13e00000/nvdec@15480000";
+        __overlay__ { xen,passthrough; status = "disabled"; };
+    };
+
+    fragment@12 {
+        target-path = "/bus@0/host1x@13e00000/vic@15340000";
+        __overlay__ { xen,passthrough; status = "disabled"; };
+    };
+
+    fragment@13 {
+        target-path = "/bus@0/host1x@13e00000/nvjpg@15380000";
+        __overlay__ { xen,passthrough; status = "disabled"; };
+    };
+
+    fragment@14 {
+        target-path = "/bus@0/host1x@13e00000/nvjpg@15540000";
+        __overlay__ { xen,passthrough; status = "disabled"; };
+    };
+
+    fragment@15 {
+        target-path = "/bus@0/host1x@13e00000/nvdla0@15880000";
+        __overlay__ { xen,passthrough; status = "disabled"; };
+    };
+
+    fragment@16 {
+        target-path = "/bus@0/host1x@13e00000/isp@14800000";
+        __overlay__ { xen,passthrough; status = "disabled"; };
+    };
+
+    fragment@17 {
+        target-path = "/bus@0/host1x@13e00000/isp-thi@14b00000";
+        __overlay__ { xen,passthrough; status = "disabled"; };
     };
 };

@@ -7,6 +7,7 @@ SRC_URI += "file://0001-arm-Add-NVIDIA-Tegra234-platform-support.patch \
             file://xen-tegra234.cfg \
             file://0001-Move-the-RAS-clear-out-of-efi-boot.h-entirely-and-in.patch \
             file://0001-Clear-only-ERR_STATUS.V-from-Xen-never-touch-ERR_ADD.patch \
+            file://0001-smmu-Remove-unnecessary-fault-generation-for-unmappe.patch \
             "
 
 # Tegra-specific build flags
@@ -29,6 +30,7 @@ do_deploy:append() {
     install -d ${DEPLOYDIR}
     if [ -f ${D}/boot/xen.efi ]; then
         install -m 0644 ${D}/boot/xen.efi ${DEPLOYDIR}/xen.efi
+        install -m 0644 ${D}/boot/xen.efi ${DEPLOYDIR}/bootaa64.efi
     fi
 }
 

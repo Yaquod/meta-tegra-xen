@@ -17,9 +17,15 @@ IMAGE_INSTALL = " \
     xen-tools-volatiles \
     xen-dtb-merge \
     xen-bootfiles \
+    l4t-usb-device-mode \
+    iptables \
+    iproute2 \
+    wpa-supplicant \
+    iw \
+    wireless-regdb-static \
+    dom0-services \
+    xen-dtb-domd \
 "
-
-IMAGE_ROOTFS_EXTRA_SPACE = "1048576"
 
 IMAGE_BOOT_FILES += " \
     xen.efi \
@@ -27,19 +33,49 @@ IMAGE_BOOT_FILES += " \
     xen.cfg \
 "
 
-ROOTFS_POSTPROCESS_COMMAND += "add_xen_extlinux_entry; "
+IMAGE_INSTALL:append = " \
+    networkmanager \
+    networkmanager-nmcli \
+    networkmanager-wifi \
+    tegra-wifi \
+    linux-firmware-rtl-nic \
+    linux-firmware-rtl8168 \
+    linux-firmware-rtl8822 \
+    bridge-utils \
+    pciutils \
+    wpa-supplicant \
+    iw \
+    wireless-regdb-static \
+    e2fsprogs e2fsprogs-mke2fs \
+    util-linux \
+"
+IMAGE_BOOT_FILES += " \
+    xen.efi;EFI/BOOT/BOOTAA64.EFI \
+    xen.cfg;EFI/BOOT/xen.cfg \
+    tegra234-xen-merged.dtb;tegra234-xen-merged.dtb \
+"
+IMAGE_INSTALL:remove = "networkmanager networkmanager-nmcli networkmanager-wifi init-ifupdown"
+TEGRAFLASH_SDCARD_SIZE="64G"
 
+# Inherit custom multi-domain class
+inherit tegra-multi-dom
+
+# Define your domains: NAME:SIZE_IN_BYTES:RECIPE_NAME
+TEGRA_DOMAINS = "\
+    domd:21474836480:xt-image-domd \
+"
+
+ROOTFS_POSTPROCESS_COMMAND += "add_xen_extlinux_entry; "
 add_xen_extlinux_entry() {
     EXTLINUX="${IMAGE_ROOTFS}${L4T_EXTLINUX_BASEDIR}/extlinux/extlinux.conf"
     if [ -f "${EXTLINUX}" ]; then
         sed -i 's/^DEFAULT primary/DEFAULT xen/' "${EXTLINUX}"
         cat >> "${EXTLINUX}" << 'XENENTRY'
-
 LABEL xen
-    MENU LABEL Xen Hypervisor + Linux Dom0
+    MENU LABEL Xen Hypervisor
     LINUX /boot/xen.efi
     FDT /boot/tegra234-xen-merged.dtb
-    APPEND ${cbootargs} console=dtuart dtuart=/bus@0/serial@3100000 dom0_mem=2G dom0_max_vcpus=4 sched=credit2 loglvl=all guest_loglvl=all smmu=no iommu=no serrors=forward sync_console noreboot
+    APPEND ${cbootargs} smmu=yes iommu=yes dom0_iommu=passthrough console=dtuart dtuart=/bus@0/serial@3100000 dom0_mem=2G dom0_max_vcpus=4 sched=credit2 loglvl=warning guest_loglvl=warning serrors=forward module_blacklist=tegra_host1x,nvidia,nvmap
 XENENTRY
     fi
 }

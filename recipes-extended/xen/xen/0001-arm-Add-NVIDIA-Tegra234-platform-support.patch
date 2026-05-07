@@ -1,4 +1,4 @@
-From d9e833111d5f424db33e6bd7a6985cb17831693a Mon Sep 17 00:00:00 2001
+From 2ce042c1c9c8f103e8fab5705ef9fa038ad1e2b9 Mon Sep 17 00:00:00 2001
 From: Ahmed Wafdy <ahmedadelwafdy782@gmail.com>
 Date: Wed, 25 Feb 2026 10:24:24 +0000
 Subject: [PATCH] arm: Add NVIDIA Tegra234 platform support

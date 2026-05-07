@@ -1,0 +1,418 @@
+/dts-v1/;
+
+/*
+ * DomD Device Tree for GA10B GPU Passthrough — Jetson Orin Nano (tegra234)
+ *
+ * STRATEGY OVERVIEW
+ * =================
+ * The nvidia,ga10b GPU driver requires BPMP for clocks, power-domains,
+ * and resets.  BPMP itself needs HSP (doorbell) + SRAM (IPC shmem).
+ * Those are shared with Dom0, creating a conflict.
+ *
+ * This DTS includes two approaches, selectable by build:
+ *
+ *   APPROACH A — Full BPMP (default, commented sections marked [A])
+ *     Provide real BPMP/HSP/SRAM nodes.  Requires either:
+ *       a) Exclusive BPMP access (blacklist tegra-bpmp in Dom0), or
+ *       b) A virtual-BPMP proxy driver that multiplexes requests.
+ *     This is the only approach that gives the native GPU driver
+ *     full runtime clock-scaling and power-gating.
+ *
+ *   APPROACH B — Stub BPMP (active below, marked [B])
+ *     Provide a stub BPMP node with a lightweight kernel driver
+ *     (see stub driver sketch at the bottom) that returns dummy
+ *     clocks, no-op resets, and always-on power-domains.
+ *     Dom0 MUST pre-configure the GPU (power-on, clocks enabled,
+ *     out of reset) BEFORE creating DomD.
+ *     The GPU runs at whatever frequency Dom0 set, no DVFS.
+ *
+ *   APPROACH C — No BPMP at all
+ *     Remove clocks / power-domains / resets / nvidia,bpmp from the
+ *     GPU node entirely.  Requires patching the ga10b driver to
+ *     make those optional.  Simplest DT, most driver work.
+ *
+ * IOMMU / SMMU NOTES
+ * ===================
+ * Xen manages the real SMMU hardware.  The iommus properties below
+ * tell Xen which SIDs to assign to DomD.  Do NOT enable the SMMU
+ * nodes — they exist only for phandle resolution.
+ *
+ * The GPU uses SID 0x2d on NISO1 SMMU (phandle 0xf0).
+ * Host1x uses SID 0x27 on NISO1.
+ *
+ * Dom0 overlay must set:  dom0-iommu=passthrough
+ * DomD config must set:   iommu = 1 ; passthrough = "enabled"
+ */
+
+/ {
+	#address-cells = <2>;
+	#size-cells = <2>;
+	compatible = "nvidia,p3768-0000+p3767-0005-super",
+	             "nvidia,p3767-0005",
+	             "nvidia,tegra234";
+
+	
+	bpmp: bpmp {
+        compatible = "nvidia,tegra234-bpmp", "nvidia,tegra186-bpmp";
+        #clock-cells = <1>;
+        #reset-cells = <1>;
+	    #power-domain-cells = <1>;
+	    phandle = <0x03>;
+	    mboxes = <&hsp_top0 0x00 0x13>;
+	    shmem = <&cpu_bpmp_tx &cpu_bpmp_rx>;
+	    status = "okay";
+
+	    thermal {
+	        #thermal-sensor-cells = <1>;
+	        compatible = "nvidia,tegra186-bpmp-thermal";
+	    };
+	};
+	hsp_top0: hsp@3d00000 {
+	     compatible = "nvidia,tegra234-hsp", "nvidia,tegra194-hsp";
+	     reg = <0x0 0x3d00000 0x0 0xa0000>;
+	     interrupts = <0x0 0x80 0x4>,
+	                  <0x0 0x81 0x4>,
+	                  <0x0 0x82 0x4>,
+	                  <0x0 0x83 0x4>;
+	     interrupt-names = "shared0", "shared1", "shared2", "shared3";
+	     #mbox-cells = <2>;
+	     status = "okay";
+	};
+	sram@40000000 {
+	    compatible = "mmio-sram";
+	    reg = <0x0 0x40000000 0x0 0x80000>;
+	    #address-cells = <1>;
+	    #size-cells = <1>;
+	    ranges = <0x0 0x0 0x40000000 0x80000>;
+	 
+	    cpu_bpmp_tx: sram@70000 {
+	        reg = <0x70000 0x1000>;
+	        label = "cpu-bpmp-tx";
+	        pool;
+	    };
+	 
+	    cpu_bpmp_rx: sram@71000 {
+	        reg = <0x71000 0x1000>;
+	        label = "cpu-bpmp-rx";
+	        pool;
+	    };
+	};
+
+	/* ================================================================
+	 * Interconnect providers — the GPU driver references these
+	 * for bandwidth requests.  With stub BPMP the requests are
+	 * no-ops, but the nodes must exist for DT parsing.
+	 * ================================================================ */
+	mc: memory-controller@2c00000 {
+		compatible = "nvidia,tegra234-mc";
+		reg = <0x0 0x2c00000 0x0 0x10000>;
+		#interconnect-cells = <1>;
+		phandle = <0x57>;
+		status = "okay";
+
+		emc@2c60000 {
+			compatible = "nvidia,tegra234-emc";
+			reg = <0x0 0x2c60000 0x0 0x90000>;
+			#interconnect-cells = <0>;
+			phandle = <0x58>;
+			status = "okay";
+		};
+	};
+
+	/* ================================================================
+	 * IOMMU / SMMU — reference-only, Xen owns the real hardware
+	 *
+	 * These nodes provide phandle resolution for iommus properties.
+	 * They MUST stay disabled so the guest kernel does not probe
+	 * them.  Xen reads iommus properties at domain creation to
+	 * know which SIDs to assign.
+	 *
+	 *   0x04  = NISO0 SMMU  (phandle from base DTS)
+	 *   0xf0  = NISO1 SMMU  (GPU SID 0x2d lives here)
+	 *   0x109 = ISO SMMU
+	 * ================================================================ */
+	smmu_niso0: iommu@12000000 {
+		compatible = "nvidia,tegra234-smmu", "nvidia,smmu-500";
+		reg = <0x0 0x12000000 0x0 0x1000000>,
+		      <0x0 0x11000000 0x0 0x1000000>;
+		#iommu-cells = <1>;
+		stream-match-mask = <0x7f80>;
+		phandle = <0x04>;
+		status = "disabled";
+	};
+
+	smmu_niso1: iommu@8000000 {
+		compatible = "nvidia,tegra234-smmu", "nvidia,smmu-500";
+		reg = <0x0 0x8000000 0x0 0x1000000>,
+		      <0x0 0x7000000  0x0 0x1000000>;
+		#iommu-cells = <1>;
+		stream-match-mask = <0x7f80>;
+		phandle = <0xf0>;
+		status = "disabled";
+	};
+
+	smmu_iso: iommu@10000000 {
+		compatible = "nvidia,tegra234-smmu", "nvidia,smmu-500";
+		reg = <0x0 0x10000000 0x0 0x1000000>;
+		#iommu-cells = <1>;
+		stream-match-mask = <0x7f80>;
+		phandle = <0x109>;
+		status = "disabled";
+	};
+
+	/* ================================================================
+	 * Main bus
+	 * ================================================================ */
+	bus@0 {
+		#address-cells = <2>;
+		#size-cells = <2>;
+		compatible = "simple-bus";
+		ranges = <0x00 0x00 0x00 0x00 0x100 0x00>;
+
+		/* ============================================================
+		 * GPU — GA10B (Ampere) — PRIMARY PASSTHROUGH TARGET
+		 * ============================================================
+		 *
+		 * Xen matches this node by path "/bus@0/gpu@17000000"
+		 * against the xen,passthrough node in Dom0's overlay and
+		 * assigns the hardware to DomD.
+		 *
+		 * Register regions:
+		 *   0x17000000  16 MB — GPU controller / GPC
+		 *   0x18000000  16 MB — GPU Falcon / PMU
+		 *   0x3b41000    4 KB — GPU scratch / priv ring
+		 *
+		 * Interrupts:
+		 *   68 (0x44) — stall0
+		 *   70 (0x46) — stall1
+		 *   71 (0x47) — stall2
+		 *   67 (0x43) — nonstall
+		 *
+		 * IOMMU:  SID 0x2d on NISO1 SMMU — the critical property
+		 *         that makes Xen assign the right stream ID.
+		 */
+		gpu@17000000 {
+			compatible = "nvidia,ga10b";
+			reg = <0x0 0x17000000 0x0 0x1000000>,
+			      <0x0 0x18000000 0x0 0x1000000>,
+			      <0x0 0x3b41000  0x0 0x1000>;
+			interrupts = <0x0 0x44 0x4>,
+				     <0x0 0x46 0x4>,
+				     <0x0 0x47 0x4>,
+				     <0x0 0x43 0x4>;
+			interrupt-names = "stall0", "stall1", "stall2", "nonstall";
+
+			/* SID 0x2d = GA10B on NISO1 SMMU.
+			 * Xen reads this and configures the SMMU to
+			 * allow DomD to DMA with this SID. */
+			iommus = <0xf0 0x2d>;
+
+			/* BPMP-provided resources.  With stub BPMP [B]
+			 * these resolve to dummy/no-op providers.
+			 * With real BPMP [A] they are functional. */
+			power-domains = <0x03 0x23>;
+			nvidia,bpmp = <0x03>;
+			clocks = <0x03 0x130>,
+				 <0x03 0x29>,
+				 <0x03 0xec>;
+			clock-names = "sysclk", "gpc0clk", "gpc1clk";
+			resets = <0x03 0x13>;
+
+			dma-coherent;
+			interconnect-names = "dma-mem", "write";
+			interconnects = <0x57 0xb8 0x58>,
+					<0x57 0xb9 0x58>;
+
+			#cooling-cells = <2>;
+			status = "okay";
+		};
+
+		/* ============================================================
+		 * Host1x — Enable if DomD needs display or media offload
+		 * ============================================================
+		 * Matching the Dom0 overlay, host1x itself is passed
+		 * through but most children are disabled.  Enable only
+		 * the engines DomD actually uses.
+		 *
+		 * IMPORTANT: host1x iommu-map lists per-context SIDs.
+		 * Xen must assign all referenced SIDs to DomD for
+		 * host1x DMA to work.  The SIDs on NISO1 (0xf0) are
+		 * 0x35-0x3c; on NISO0 (0x04) are 0x35-0x3c.
+		 * Add these to the Dom0 overlay if you enable host1x
+		 * children that use them.
+		 */
+		host1x@13e00000 {
+			iommus = <0xf0 0x27>;
+			#address-cells = <2>;
+			#size-cells = <2>;
+			dma-coherent;
+			interconnect-names = "dma-mem";
+			clock-names = "host1x", "actmon";
+			interconnects = <0x57 0x16 0x58>;
+			reg-names = "common", "hypervisor", "vm", "actmon";
+			assigned-clocks = <0x03 0x2e>;
+			assigned-clock-rates = <0xc28cb00>;
+			interrupts = <0x0 0x1c0 0x4>, <0x0 0x1c1 0x4>,
+				     <0x0 0x1c2 0x4>, <0x0 0x1c3 0x4>,
+				     <0x0 0x1c4 0x4>, <0x0 0x1c5 0x4>,
+				     <0x0 0x1c6 0x4>, <0x0 0x1c7 0x4>,
+				     <0x0 0x107 0x4>;
+			clocks = <0x03 0x2e>, <0x03 0x01>;
+			compatible = "nvidia,tegra234-host1x";
+			ranges = <0x0 0x14800000 0x0 0x14800000 0x0 0x2000000>,
+				 <0x0 0x24700000 0x0 0x24700000 0x0 0x80000>;
+			interrupt-names = "syncpt0", "syncpt1", "syncpt2",
+					  "syncpt3", "syncpt4", "syncpt5",
+					  "syncpt6", "syncpt7", "host1x";
+			reg = <0x0 0x13e00000 0x0 0x10000>,
+			      <0x0 0x13e10000 0x0 0x10000>,
+			      <0x0 0x13e40000 0x0 0x10000>,
+			      <0x0 0x13ef0000 0x0 0x60000>;
+			iommu-map = <0x00 0x04 0x35 0x01>,
+				    <0x01 0x04 0x36 0x01>,
+				    <0x02 0x04 0x37 0x01>,
+				    <0x03 0x04 0x38 0x01>,
+				    <0x04 0x04 0x39 0x01>,
+				    <0x05 0x04 0x3a 0x01>,
+				    <0x06 0x04 0x3b 0x01>,
+				    <0x07 0x04 0x3c 0x01>,
+				    <0x08 0xf0 0x35 0x01>,
+				    <0x09 0xf0 0x36 0x01>,
+				    <0x0a 0xf0 0x37 0x01>,
+				    <0x0b 0xf0 0x38 0x01>,
+				    <0x0c 0xf0 0x39 0x01>,
+				    <0x0d 0xf0 0x3a 0x01>,
+				    <0x0e 0xf0 0x3b 0x01>,
+				    <0x0f 0xf0 0x3c 0x01>;
+			status = "okay";
+
+			/* Host1x children — disabled by default, matching
+			 * the Dom0 overlay.  Enable individual engines
+			 * that DomD needs.  Each uses its own SID. */
+
+			nvdec@15480000 {
+				power-domains = <0x03 0x17>;
+				iommus = <0xf0 0x29>;
+				dma-coherent;
+				clock-names = "nvdec", "fuse", "tsec_pka";
+				resets = <0x03 0x2c>;
+				clocks = <0x03 0x53>, <0x03 0x28>, <0x03 0x9a>;
+				compatible = "nvidia,tegra234-nvdec";
+				reg = <0x0 0x15480000 0x0 0x40000>;
+				reset-names = "nvdec";
+				nvidia,memory-controller = <0x57>;
+				status = "disabled";
+			};
+
+			vic@15340000 {
+				power-domains = <0x03 0x1d>;
+				iommus = <0xf0 0x34>;
+				dma-coherent;
+				clock-names = "vic";
+				resets = <0x03 0x71>;
+				interrupts = <0x0 0xce 0x4>;
+				clocks = <0x03 0xa7>;
+				compatible = "nvidia,tegra234-vic";
+				reg = <0x0 0x15340000 0x0 0x40000>;
+				reset-names = "vic";
+				status = "disabled";
+			};
+
+			nvjpg@15380000 {
+				power-domains = <0x03 0x18>;
+				iommus = <0xf0 0x2a>;
+				dma-coherent;
+				clock-names = "nvjpg";
+				resets = <0x03 0x3d>;
+				clocks = <0x03 0x5a>;
+				compatible = "nvidia,tegra234-nvjpg";
+				reg = <0x0 0x15380000 0x0 0x40000>;
+				reset-names = "nvjpg";
+				nvidia,host1x-class = <0xc0>;
+				status = "disabled";
+			};
+
+			nvjpg@15540000 {
+				power-domains = <0x03 0x24>;
+				iommus = <0x04 0x25>;
+				dma-coherent;
+				clock-names = "nvjpg";
+				resets = <0x03 0x0a>;
+				clocks = <0x03 0x14>;
+				compatible = "nvidia,tegra234-nvjpg";
+				reg = <0x0 0x15540000 0x0 0x40000>;
+				reset-names = "nvjpg";
+				nvidia,host1x-class = <0x07>;
+				status = "disabled";
+			};
+
+			nvdla0@15880000 {
+				power-domains = <0x03 0x20>;
+				iommus = <0xf0 0x2b>;
+				dma-coherent;
+				clock-names = "nvdla0", "nvdla0_flcn";
+				resets = <0x03 0x06>;
+				interrupts = <0x0 0xec 0x4>;
+				clocks = <0x03 0xaf>, <0x03 0xae>;
+				compatible = "nvidia,tegra234-nvdla";
+				reg = <0x0 0x15880000 0x0 0x40000>;
+				status = "disabled";
+			};
+
+			isp@14800000 {
+				power-domains = <0x03 0x16>;
+				iommus = <0xf0 0x28>;
+				dma-coherent;
+				clock-names = "isp";
+				resets = <0x03 0x24>;
+				clocks = <0x03 0x45>;
+				compatible = "nvidia,tegra194-isp";
+				reg = <0x0 0x14800000 0x0 0x10000>;
+				reset-names = "isp";
+				status = "disabled";
+			};
+
+			isp-thi@14b00000 {
+				iommus = <0xf0 0x28>;
+				dma-coherent;
+				resets = <0x03 0x24>;
+				compatible = "nvidia,tegra194-isp-thi";
+				status = "disabled";
+			};
+		};
+	};
+
+	/* ================================================================
+	 * Thermal zones — optional, for GPU thermal management
+	 * ================================================================
+	 * Only useful with a working BPMP thermal sensor.
+	 * With stub BPMP, comment this out. */
+	/*
+	thermal-zones {
+		gpu-thermal {
+			polling-delay = <1000>;
+			polling-delay-passive = <1000>;
+			thermal-sensors = <&bpmp 1>;
+			status = "okay";
+
+			trips {
+				gpu-sw-slowdown {
+					temperature = <98500>;
+					hysteresis = <5000>;
+					type = "passive";
+				};
+				gpu-sw-shutdown {
+					temperature = <104500>;
+					hysteresis = <0>;
+					type = "critical";
+				};
+				hot-surface {
+					temperature = <70000>;
+					hysteresis = <8000>;
+					type = "passive";
+				};
+			};
+		};
+	};
+	*/
+};
